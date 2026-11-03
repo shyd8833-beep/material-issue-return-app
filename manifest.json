@@ -1,0 +1,13 @@
+
+{
+  "name": "Material Issue Return App",
+  "short_name": "Material App",
+  "description": "Material Issue and Return Management",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#1f4e78",
+  "orientation": "any",
+  "icons": []
+}
