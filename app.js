@@ -1,8 +1,8 @@
 
 /************************************************************
  * MATERIAL ISSUE & RETURN APP
- * Frontend Version 1.0
- * API: Cloudflare Worker + Google Apps Script
+ * Frontend Version 2.0
+ * Backend: Cloudflare Worker + Google Apps Script
  ************************************************************/
 
 const API_URL = "https://material-issue-api.shyd8833.workers.dev";
@@ -16,22 +16,26 @@ const state = {
   people: [],
   transactions: [],
   dashboard: null,
-  deferredInstall: null
+  reportRows: [],
+  deferredInstall: null,
+  scannerStream: null,
+  scannerActive: false,
+  pendingVoiceCommand: null
 };
 
-const $ = (id) => document.getElementById(id);
+const $ = id => document.getElementById(id);
 
 const PAGE_INFO = {
   dashboard: ["Dashboard", "Material management overview"],
   issue: ["Material Issue", "Issue material to an employee"],
-  inward: ["Material Inward", "Add material to stock"],
-  return: ["Material Return", "Record material returns"],
-  stock: ["Live Stock", "Current material availability"],
+  inward: ["Material Inward", "Add material to Fresh Stock"],
+  return: ["Material Return", "Record returned material"],
+  stock: ["Live Stock", "Fresh, pending and returned stock"],
   history: ["Transaction History", "All material transactions"],
   people: ["People", "Manage employees"],
   items: ["Items", "Manage material list"],
   reports: ["Reports", "Transaction reports"],
-  voice: ["Voice Agent", "Voice-assisted material entry"],
+  voice: ["Voice Agent", "Voice-assisted material management"],
   settings: ["Admin Settings", "Account and administration"]
 };
 
@@ -48,9 +52,7 @@ function init() {
   $("logoutButton").addEventListener("click", logout);
 
   document.querySelectorAll(".nav-button").forEach(button => {
-    button.addEventListener("click", () => {
-      navigate(button.dataset.page);
-    });
+    button.addEventListener("click", () => navigate(button.dataset.page));
   });
 
   $("installButton").addEventListener("click", installApp);
@@ -61,6 +63,12 @@ function init() {
     $("installButton").hidden = false;
   });
 
+  window.addEventListener("appinstalled", () => {
+    showToast("App installed successfully.");
+    $("installButton").hidden = true;
+  });
+
+  registerServiceWorker();
   testConnection();
 
   const saved = sessionStorage.getItem("material_session");
@@ -75,6 +83,16 @@ function init() {
     } catch (error) {
       sessionStorage.removeItem("material_session");
     }
+  }
+}
+
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+
+  try {
+    await navigator.serviceWorker.register("./service-worker.js");
+  } catch (error) {
+    console.warn("Service worker registration failed:", error);
   }
 }
 
@@ -94,6 +112,10 @@ async function api(action, data = {}) {
       ...data
     })
   });
+
+  if (!response.ok) {
+    throw new Error("Server connection failed: " + response.status);
+  }
 
   const result = await response.json();
 
@@ -133,10 +155,7 @@ async function login(event) {
   $("loginMessage").textContent = "";
 
   try {
-    const result = await api("login", {
-      username,
-      password
-    });
+    const result = await api("login", { username, password });
 
     state.token = result.token;
     state.username = result.username;
@@ -149,7 +168,7 @@ async function login(event) {
     }));
 
     $("password").value = "";
-    openApplication();
+    await openApplication();
 
   } catch (error) {
     $("loginMessage").textContent = error.message;
@@ -160,6 +179,8 @@ async function login(event) {
 }
 
 function logout() {
+  stopScanner();
+
   state.token = "";
   state.username = "";
   state.role = "";
@@ -184,15 +205,17 @@ async function openApplication() {
   $("loggedInRole").textContent = state.role;
   $("userAvatar").textContent = state.username.charAt(0).toUpperCase();
 
-  if (state.role !== "ADMIN") {
-    document.querySelector('[data-page="settings"]').hidden = true;
-    document.querySelector('[data-page="people"]').hidden = true;
-    document.querySelector('[data-page="items"]').hidden = true;
-  }
+  document.querySelectorAll(".nav-button").forEach(button => {
+    const page = button.dataset.page;
+
+    button.hidden =
+      state.role !== "ADMIN" &&
+      ["settings", "people", "items"].includes(page);
+  });
 
   try {
     await refreshData();
-    navigate("dashboard");
+    await navigate("dashboard");
   } catch (error) {
     showToast(error.message);
     logout();
@@ -215,14 +238,14 @@ async function refreshData() {
   state.people = people.people || [];
   state.transactions = transactions.transactions || [];
   state.dashboard = dashboard;
-}
 
-/* =========================================================
-   NAVIGATION
-   ========================================================= */
+  checkStockAlerts();
+}
 
 async function navigate(page) {
   if (!PAGE_INFO[page]) return;
+
+  stopScanner();
 
   state.page = page;
 
@@ -255,6 +278,7 @@ async function navigate(page) {
     };
 
     renderers[page]();
+
   } catch (error) {
     $("pageContent").innerHTML =
       `<div class="empty-state">${escapeHTML(error.message)}</div>`;
@@ -272,31 +296,30 @@ function renderDashboard() {
     <div class="stats-grid">
       ${statCard("Total Items", d.totalItems)}
       ${statCard("Total People", d.totalPeople)}
-      ${statCard("Available Stock", number(d.availableStock))}
-      ${statCard("Active Issues", number(d.activeIssues))}
+      ${statCard("Fresh Stock", number(d.availableStock))}
+      ${statCard("Pending Issue", number(d.activeIssues))}
     </div>
 
-    <div class="content-grid">
-      <div class="panel">
-        <h2>Low Stock Alerts</h2>
-        ${d.lowStock.length ? `
-          ${table(
-            ["Item Code", "Item Name", "Available", "Minimum"],
+    <div class="stats-grid">
+      ${statCard("Returned / Used", number(d.returnedStock))}
+      ${statCard("Reusable Pending", number(d.reusablePending))}
+      ${statCard("Damaged Material", number(d.damagedStock))}
+      ${statCard("Today's Transactions", number(d.todayTransactions))}
+    </div>
+
+    <div class="panel">
+      <h2>Low Stock Alerts</h2>
+      ${d.lowStock && d.lowStock.length
+        ? table(
+            ["Item Code", "Material", "Fresh Stock", "Minimum"],
             d.lowStock.map(x => [
               x.ItemCode,
               x.ItemName,
-              number(x.AvailableStock),
+              number(x.FreshStock),
               number(x.MinStock)
             ])
-          )}
-        ` : '<div class="empty-state">No low-stock alerts.</div>'}
-      </div>
-
-      <div class="panel">
-        <h2>Today's Activity</h2>
-        <div class="stat-value">${number(d.todayTransactions)}</div>
-        <p>Transactions recorded today</p>
-      </div>
+          )
+        : '<div class="empty-state">No low-stock alerts.</div>'}
     </div>
 
     <div class="panel">
@@ -304,6 +327,18 @@ function renderDashboard() {
       ${stockTable(d.stock || [])}
     </div>
   `;
+}
+
+function checkStockAlerts() {
+  if (!state.dashboard || !state.dashboard.lowStock) return;
+
+  const count = state.dashboard.lowStock.length;
+
+  if (count > 0) {
+    document.title = `(${count}) Low Stock - Material App`;
+  } else {
+    document.title = "Material Issue Return App";
+  }
 }
 
 /* =========================================================
@@ -319,17 +354,18 @@ function renderIssue() {
         <div class="form-grid">
 
           <div class="form-field">
-            <label>Employee</label>
+            <label>Employee Name or Employee Code</label>
             <input list="peopleList" id="issueEmployee"
-              placeholder="Search employee name or code" required>
+              placeholder="Search employee" required>
             ${peopleDatalist()}
+            <small id="personIdInfo"></small>
           </div>
 
           <div class="form-field">
             <label>Material</label>
-            <select id="issueItem" required>
-              ${itemOptions()}
-            </select>
+            <input list="itemList" id="issueItemSearch"
+              placeholder="Search material name or code" required>
+            ${itemDatalist()}
           </div>
 
           <div class="form-field">
@@ -371,17 +407,31 @@ function renderIssue() {
 
       <p id="issueMessage" class="message"></p>
     </div>
+
+    ${scannerPanel("issue")}
   `;
 
   $("issueForm").addEventListener("submit", submitIssue);
+  $("issueEmployee").addEventListener("input", updateIssueInfo);
+  $("issueItemSearch").addEventListener("input", updateOverrideVisibility);
+  $("issueEmployee").addEventListener("change", updateIssueInfo);
 
-  $("issueEmployee").addEventListener("input", updateOverrideVisibility);
-  $("issueItem").addEventListener("change", updateOverrideVisibility);
+  setupScanner("issue");
+}
+
+function updateIssueInfo() {
+  const person = findPerson($("issueEmployee").value);
+
+  $("personIdInfo").textContent = person
+    ? `PersonID: ${person.PersonID} | Employee Code: ${person.EmployeeCode}`
+    : "Employee not selected";
+
+  updateOverrideVisibility();
 }
 
 function updateOverrideVisibility() {
   const person = findPerson($("issueEmployee").value);
-  const item = $("issueItem").value;
+  const item = findItem($("issueItemSearch").value);
 
   if (!person || !item || state.role !== "ADMIN") {
     $("overrideFields").hidden = true;
@@ -390,7 +440,7 @@ function updateOverrideVisibility() {
 
   const outstanding = employeeItemOutstanding(
     person.EmployeeCode,
-    item
+    item.ItemCode
   );
 
   $("overrideFields").hidden = outstanding <= 0;
@@ -400,18 +450,28 @@ async function submitIssue(event) {
   event.preventDefault();
 
   const person = findPerson($("issueEmployee").value);
+  const item = findItem($("issueItemSearch").value);
 
   if (!person) {
-    showToast("Select a valid employee from the list.");
+    showToast("Select a valid employee.");
     return;
   }
 
-  const itemCode = $("issueItem").value;
+  if (!item) {
+    showToast("Select a valid material.");
+    return;
+  }
+
   const quantity = Number($("issueQuantity").value);
+
+  if (!Number.isFinite(quantity) || quantity <= 0) {
+    showToast("Enter a valid quantity.");
+    return;
+  }
 
   const outstanding = employeeItemOutstanding(
     person.EmployeeCode,
-    itemCode
+    item.ItemCode
   );
 
   const override = outstanding > 0;
@@ -434,20 +494,18 @@ async function submitIssue(event) {
     }
   }
 
-  const item = state.items.find(x => x.ItemCode === itemCode);
-
-  if (!item || quantity > Number(item.AvailableStock)) {
-    showToast("Insufficient stock.");
+  if (quantity > Number(item.AvailableStock)) {
+    showToast("Insufficient Fresh Stock.");
     return;
   }
 
   if (!confirm(
-    `Issue ${quantity} ${item.ItemName} to ${person.PersonName}?`
+    `Issue ${quantity} ${item.ItemName} to ${person.PersonName} (${person.EmployeeCode})?`
   )) return;
 
   try {
     await api("issue", {
-      itemCode,
+      itemCode: item.ItemCode,
       employeeCode: person.EmployeeCode,
       quantity,
       reference: $("issueReference").value,
@@ -471,16 +529,16 @@ async function submitIssue(event) {
 function renderInward() {
   $("pageContent").innerHTML = `
     <div class="panel">
-      <h2>Material Inward</h2>
+      <h2>Material Inward - Fresh Stock</h2>
 
       <form id="inwardForm">
         <div class="form-grid">
 
           <div class="form-field">
             <label>Material</label>
-            <select id="inwardItem" required>
-              ${itemOptions()}
-            </select>
+            <input list="itemList" id="inwardItem"
+              placeholder="Search material" required>
+            ${itemDatalist()}
           </div>
 
           <div class="form-field">
@@ -506,25 +564,37 @@ function renderInward() {
         </div>
       </form>
     </div>
+
+    ${scannerPanel("inward")}
   `;
 
   $("inwardForm").addEventListener("submit", async event => {
     event.preventDefault();
 
+    const item = findItem($("inwardItem").value);
+
+    if (!item) {
+      showToast("Select a valid material.");
+      return;
+    }
+
     try {
       await api("inward", {
-        itemCode: $("inwardItem").value,
+        itemCode: item.ItemCode,
         quantity: Number($("inwardQuantity").value),
         reference: $("inwardReference").value,
         notes: $("inwardNotes").value
       });
 
-      showToast("Material inward saved.");
+      showToast("Material inward saved to Fresh Stock.");
       await navigate("inward");
+
     } catch (error) {
       showToast(error.message);
     }
   });
+
+  setupScanner("inward");
 }
 
 /* =========================================================
@@ -554,29 +624,33 @@ function getOutstanding(txnId) {
 function renderReturn() {
   const pending = getPendingIssues();
 
+  const returnedRows = state.transactions.filter(t =>
+    t.Type === "RETURN"
+  );
+
   $("pageContent").innerHTML = `
     <div class="panel">
       <h2>Pending Material Returns</h2>
 
-      ${pending.length ? `
-        ${table(
-          ["Employee", "Material", "Issued", "Pending", "Action"],
-          pending.map(issue => [
-            issue.PersonName,
-            issue.ItemName,
-            number(issue.Quantity),
-            number(getOutstanding(issue.TxnID)),
-            `<button class="secondary-button"
-              onclick="selectReturn('${escapeAttribute(issue.TxnID)}')">
-              Return
-            </button>`
-          ])
-        )}
-      ` : '<div class="empty-state">No pending returns.</div>'}
+      ${pending.length ? table(
+        ["Employee", "Employee Code", "Material", "Issued", "Pending", "Action"],
+        pending.map(issue => [
+          issue.PersonName,
+          issue.EmployeeCode,
+          issue.ItemName,
+          number(issue.Quantity),
+          number(getOutstanding(issue.TxnID)),
+          `<button class="secondary-button"
+            onclick="selectReturn('${escapeAttribute(issue.TxnID)}')">
+            Return
+          </button>`
+        ])
+      ) : '<div class="empty-state">No pending returns.</div>'}
     </div>
 
     <div class="panel">
       <h2>Record Material Return</h2>
+
       <form id="returnForm">
         <div class="form-grid">
           <div class="form-field full-width">
@@ -585,7 +659,8 @@ function renderReturn() {
               <option value="">Select pending issue</option>
               ${pending.map(t => `
                 <option value="${escapeAttribute(t.TxnID)}">
-                  ${escapeHTML(t.PersonName)} — ${escapeHTML(t.ItemName)}
+                  ${escapeHTML(t.PersonName)} (${escapeHTML(t.EmployeeCode)})
+                  — ${escapeHTML(t.ItemName)}
                   — Pending ${number(getOutstanding(t.TxnID))}
                 </option>
               `).join("")}
@@ -614,6 +689,38 @@ function renderReturn() {
         </div>
       </form>
     </div>
+
+    <div class="panel">
+      <h2>Returned Material Inspection</h2>
+      <p>Admin must classify returned material before it can be transferred to Fresh Stock.</p>
+
+      ${state.role === "ADMIN"
+        ? returnedRows.length
+          ? table(
+              ["Return ID", "Material", "Employee", "Quantity", "Condition", "Action"],
+              returnedRows.map(t => [
+                t.TxnID,
+                t.ItemName,
+                t.PersonName,
+                number(t.Quantity),
+                t.ReturnCondition || "Not Classified",
+                t.ReturnCondition
+                  ? "-"
+                  : `<button class="secondary-button"
+                      onclick="classifyReturnPrompt('${escapeAttribute(t.TxnID)}','REUSABLE')">
+                      Reusable
+                    </button>
+                    <button class="secondary-button"
+                      onclick="classifyReturnPrompt('${escapeAttribute(t.TxnID)}','DAMAGED')">
+                      Damaged
+                    </button>`
+              ])
+            )
+          : '<div class="empty-state">No returned material.</div>'
+        : '<div class="empty-state">Admin access required for inspection.</div>'}
+    </div>
+
+    ${state.role === "ADMIN" ? renderReusableTransferPanel() : ""}
   `;
 
   $("returnForm").addEventListener("submit", async event => {
@@ -623,8 +730,8 @@ function renderReturn() {
     const quantity = Number($("returnQuantity").value);
     const pendingQty = getOutstanding(issueTxnId);
 
-    if (!issueTxnId || quantity > pendingQty) {
-      showToast("Return quantity exceeds pending quantity.");
+    if (!issueTxnId || quantity <= 0 || quantity > pendingQty) {
+      showToast("Return quantity exceeds pending quantity or is invalid.");
       return;
     }
 
@@ -638,8 +745,9 @@ function renderReturn() {
         notes: $("returnNotes").value
       });
 
-      showToast("Material return saved.");
+      showToast("Return saved. Fresh Stock has not increased.");
       await navigate("return");
+
     } catch (error) {
       showToast(error.message);
     }
@@ -651,6 +759,107 @@ window.selectReturn = function(txnId) {
   $("returnQuantity").focus();
 };
 
+window.classifyReturnPrompt = async function(txnId, condition) {
+  const label = condition === "REUSABLE" ? "Reusable" : "Damaged";
+
+  if (!confirm(`Classify this returned material as ${label}?`)) return;
+
+  try {
+    await api("classifyReturn", {
+      returnTxnId: txnId,
+      condition
+    });
+
+    showToast("Return classified as " + label + ".");
+    await navigate("return");
+
+  } catch (error) {
+    showToast(error.message);
+  }
+};
+
+function renderReusableTransferPanel() {
+  const items = state.items.filter(item =>
+    Number(item.ReusablePending || 0) > 0
+  );
+
+  return `
+    <div class="panel">
+      <h2>Admin - Transfer Reusable Material to Fresh Stock</h2>
+
+      <form id="reusableTransferForm">
+        <div class="form-grid">
+          <div class="form-field">
+            <label>Material</label>
+            <select id="transferItem" required>
+              <option value="">Select material</option>
+              ${items.map(i => `
+                <option value="${escapeAttribute(i.ItemCode)}">
+                  ${escapeHTML(i.ItemName)} - Reusable:
+                  ${number(i.ReusablePending)}
+                </option>
+              `).join("")}
+            </select>
+          </div>
+
+          <div class="form-field">
+            <label>Transfer Quantity</label>
+            <input type="number" id="transferQuantity"
+              min="0.0001" step="any" required>
+          </div>
+
+          <div class="form-field">
+            <label>Reference</label>
+            <input id="transferReference">
+          </div>
+
+          <div class="form-field">
+            <label>Notes</label>
+            <input id="transferNotes">
+          </div>
+        </div>
+
+        <button class="action-button">Transfer to Fresh Stock</button>
+      </form>
+    </div>
+  `;
+}
+
+/* =========================================================
+   REUSABLE TRANSFER FORM HANDLER
+   ========================================================= */
+
+document.addEventListener("submit", async event => {
+  if (event.target.id !== "reusableTransferForm") return;
+
+  event.preventDefault();
+
+  const itemCode = $("transferItem").value;
+  const quantity = Number($("transferQuantity").value);
+
+  if (!itemCode || quantity <= 0) {
+    showToast("Select material and valid quantity.");
+    return;
+  }
+
+  if (!confirm("Transfer approved reusable material to Fresh Stock?")) return;
+
+  try {
+    await api("transferReusable", {
+      itemCode,
+      quantity,
+      reference: $("transferReference").value,
+      notes: $("transferNotes").value
+    });
+
+    showToast("Reusable material transferred to Fresh Stock.");
+    await navigate("return");
+
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
 /* =========================================================
    LIVE STOCK
    ========================================================= */
@@ -659,12 +868,11 @@ function renderStock() {
   $("pageContent").innerHTML = `
     <div class="panel">
       <h2>Live Material Stock</h2>
+
       <input class="search-input" id="stockSearch"
         placeholder="Search item code or name">
 
-      <div id="stockTable">
-        ${stockTable(state.items)}
-      </div>
+      <div id="stockTable">${stockTable(state.items)}</div>
     </div>
   `;
 
@@ -672,8 +880,8 @@ function renderStock() {
     const q = event.target.value.toLowerCase();
 
     const filtered = state.items.filter(item =>
-      String(item.ItemCode).toLowerCase().includes(q) ||
-      String(item.ItemName).toLowerCase().includes(q)
+      [item.ItemCode, item.ItemName]
+        .some(v => String(v || "").toLowerCase().includes(q))
     );
 
     $("stockTable").innerHTML = stockTable(filtered);
@@ -682,9 +890,13 @@ function renderStock() {
 
 function stockTable(items) {
   return table(
-    ["Item Code", "Material", "Unit", "Available", "Issued", "Minimum", "Status"],
+    [
+      "Item Code", "Material", "Unit", "Fresh Stock",
+      "Pending Issue", "Returned/Used", "Reusable Pending",
+      "Damaged", "Minimum", "Status"
+    ],
     items.map(item => {
-      const available = Number(item.AvailableStock || 0);
+      const available = Number(item.FreshStock ?? item.AvailableStock ?? 0);
       const minimum = Number(item.MinStock || 0);
 
       return [
@@ -692,7 +904,10 @@ function stockTable(items) {
         item.ItemName,
         item.Unit,
         number(available),
-        number(item.IssuedStock),
+        number(item.PendingIssue ?? item.IssuedStock),
+        number(item.ReturnedStock),
+        number(item.ReusablePending),
+        number(item.DamagedStock),
         number(minimum),
         available <= minimum
           ? '<span class="badge badge-warning">Low Stock</span>'
@@ -710,6 +925,7 @@ function renderHistory() {
   $("pageContent").innerHTML = `
     <div class="panel">
       <h2>Transaction History</h2>
+
       <input class="search-input" id="historySearch"
         placeholder="Search employee, item, code or transaction">
 
@@ -724,13 +940,9 @@ function renderHistory() {
 
     const filtered = state.transactions.filter(t =>
       [
-        t.TxnID,
-        t.Type,
-        t.ItemCode,
-        t.ItemName,
-        t.EmployeeCode,
-        t.PersonName,
-        t.Department
+        t.TxnID, t.Type, t.ItemCode, t.ItemName,
+        t.EmployeeCode, t.PersonName, t.Department,
+        t.ReturnCondition
       ].some(v => String(v || "").toLowerCase().includes(q))
     );
 
@@ -740,15 +952,20 @@ function renderHistory() {
 
 function transactionTable(rows) {
   return table(
-    ["Date", "Type", "Item", "Quantity", "Employee", "Entered By", "Notes"],
+    [
+      "Date", "Type", "Item", "Quantity",
+      "Employee", "Employee Code", "Condition", "Entered By", "Notes"
+    ],
     rows.map(t => [
       formatDate(t.Timestamp),
       t.Type,
-      t.ItemName + " (" + t.ItemCode + ")",
+      `${escapeHTML(t.ItemName)} (${escapeHTML(t.ItemCode)})`,
       number(t.Quantity),
-      t.PersonName || "-",
-      t.EnteredBy,
-      t.Notes || "-"
+      escapeHTML(t.PersonName || "-"),
+      escapeHTML(t.EmployeeCode || "-"),
+      escapeHTML(t.ReturnCondition || "-"),
+      escapeHTML(t.EnteredBy || "-"),
+      escapeHTML(t.Notes || "-")
     ])
   );
 }
@@ -759,7 +976,8 @@ function transactionTable(rows) {
 
 function renderPeople() {
   if (state.role !== "ADMIN") {
-    $("pageContent").innerHTML = '<div class="empty-state">Admin access required.</div>';
+    $("pageContent").innerHTML =
+      '<div class="empty-state">Admin access required.</div>';
     return;
   }
 
@@ -773,25 +991,26 @@ function renderPeople() {
             <label>Employee Code</label>
             <input id="personCode" required>
           </div>
+
           <div class="form-field">
             <label>Employee Name</label>
             <input id="personName" required>
           </div>
+
           <div class="form-field">
             <label>Department</label>
             <input id="personDepartment">
           </div>
         </div>
-        <div class="form-actions">
-          <button class="action-button">Save Employee</button>
-        </div>
+
+        <button class="action-button">Save Employee</button>
       </form>
     </div>
 
     <div class="panel">
       <h2>Employee List</h2>
       <input class="search-input" id="peopleSearch"
-        placeholder="Search employee">
+        placeholder="Search employee name or code">
 
       <div id="peopleTable">${peopleTable(state.people)}</div>
     </div>
@@ -809,6 +1028,7 @@ function renderPeople() {
 
       showToast("Employee saved.");
       await navigate("people");
+
     } catch (error) {
       showToast(error.message);
     }
@@ -819,7 +1039,7 @@ function renderPeople() {
 
     $("peopleTable").innerHTML = peopleTable(
       state.people.filter(p =>
-        [p.EmployeeCode, p.PersonName, p.Department]
+        [p.PersonID, p.EmployeeCode, p.PersonName, p.Department]
           .some(v => String(v || "").toLowerCase().includes(q))
       )
     );
@@ -828,11 +1048,12 @@ function renderPeople() {
 
 function peopleTable(rows) {
   return table(
-    ["Employee Code", "Name", "Department"],
+    ["Person ID", "Employee Code", "Name", "Department"],
     rows.map(p => [
-      p.EmployeeCode,
-      p.PersonName,
-      p.Department || "-"
+      escapeHTML(p.PersonID || "-"),
+      escapeHTML(p.EmployeeCode),
+      escapeHTML(p.PersonName),
+      escapeHTML(p.Department || "-")
     ])
   );
 }
@@ -843,7 +1064,8 @@ function peopleTable(rows) {
 
 function renderItems() {
   if (state.role !== "ADMIN") {
-    $("pageContent").innerHTML = '<div class="empty-state">Admin access required.</div>';
+    $("pageContent").innerHTML =
+      '<div class="empty-state">Admin access required.</div>';
     return;
   }
 
@@ -857,19 +1079,23 @@ function renderItems() {
             <label>Item Code</label>
             <input id="itemCode" required>
           </div>
+
           <div class="form-field">
             <label>Item Name</label>
             <input id="itemName" required>
           </div>
+
           <div class="form-field">
             <label>Unit</label>
             <input id="itemUnit" value="PCS" required>
           </div>
+
           <div class="form-field">
             <label>Opening Stock</label>
             <input type="number" id="openingStock"
               min="0" step="any" value="0" required>
           </div>
+
           <div class="form-field">
             <label>Minimum Stock</label>
             <input type="number" id="minStock"
@@ -877,16 +1103,15 @@ function renderItems() {
           </div>
         </div>
 
-        <div class="form-actions">
-          <button class="action-button">Save Material</button>
-        </div>
+        <button class="action-button">Save Material</button>
       </form>
     </div>
 
     <div class="panel">
       <h2>Material List</h2>
       <input class="search-input" id="itemSearch"
-        placeholder="Search material">
+        placeholder="Search material code or name">
+
       <div id="itemsTable">${stockTable(state.items)}</div>
     </div>
   `;
@@ -905,6 +1130,7 @@ function renderItems() {
 
       showToast("Material saved.");
       await navigate("items");
+
     } catch (error) {
       showToast(error.message);
     }
@@ -937,10 +1163,12 @@ function renderReports() {
             <label>From Date</label>
             <input type="date" id="reportFrom">
           </div>
+
           <div class="form-field">
             <label>To Date</label>
             <input type="date" id="reportTo">
           </div>
+
           <div class="form-field">
             <label>Transaction Type</label>
             <select id="reportType">
@@ -948,31 +1176,36 @@ function renderReports() {
               <option value="ISSUE">Issue</option>
               <option value="INWARD">Inward</option>
               <option value="RETURN">Return</option>
+              <option value="REUSABLE_TRANSFER">Reusable Transfer</option>
             </select>
           </div>
+
           <div class="form-field">
             <label>Employee</label>
             <select id="reportEmployee">
               <option value="">All Employees</option>
               ${state.people.map(p => `
                 <option value="${escapeAttribute(p.EmployeeCode)}">
-                  ${escapeHTML(p.PersonName)}
+                  ${escapeHTML(p.PersonName)} (${escapeHTML(p.EmployeeCode)})
                 </option>
               `).join("")}
             </select>
           </div>
+
           <div class="form-field">
             <label>Material</label>
             <select id="reportItem">
               <option value="">All Materials</option>
-              ${itemOptions()}
+              ${state.items.map(i => `
+                <option value="${escapeAttribute(i.ItemCode)}">
+                  ${escapeHTML(i.ItemName)} (${escapeHTML(i.ItemCode)})
+                </option>
+              `).join("")}
             </select>
           </div>
         </div>
 
-        <div class="form-actions">
-          <button class="action-button">Generate Report</button>
-        </div>
+        <button class="action-button">Generate Report</button>
       </form>
     </div>
 
@@ -981,6 +1214,7 @@ function renderReports() {
         <button class="secondary-button" id="exportReport">Export CSV</button>
         <button class="secondary-button" id="printReport">Print</button>
       </div>
+
       <div id="reportTable"></div>
     </div>
   `;
@@ -1005,9 +1239,9 @@ function renderReports() {
     }
   });
 
-  $("exportReport").addEventListener("click", () => {
-    downloadCSV(state.reportRows || []);
-  });
+  $("exportReport").addEventListener("click", () =>
+    downloadCSV(state.reportRows)
+  );
 
   $("printReport").addEventListener("click", () => window.print());
 }
@@ -1020,7 +1254,14 @@ function renderVoice() {
   $("pageContent").innerHTML = `
     <div class="voice-panel">
       <h2>Hindi Voice Agent</h2>
-      <p>उदाहरण: "Rahul ko 2 Pen issue karo"</p>
+
+      <p>उदाहरण:</p>
+      <ul>
+        <li>"Rahul ko 2 Pen issue karo"</li>
+        <li>"Rahul ka pending issue batao"</li>
+        <li>"Pen ka fresh stock kitna hai"</li>
+        <li>"Rahul ko 1 Pen return karo"</li>
+      </ul>
 
       <button id="voiceButton" class="voice-button">🎙</button>
 
@@ -1033,9 +1274,7 @@ function renderVoice() {
       </div>
 
       <div class="form-actions">
-        <button class="action-button" id="voiceParse">
-          आदेश समझें
-        </button>
+        <button class="action-button" id="voiceParse">आदेश समझें</button>
       </div>
 
       <div id="voiceResult"></div>
@@ -1044,6 +1283,18 @@ function renderVoice() {
 
   $("voiceButton").addEventListener("click", startVoice);
   $("voiceParse").addEventListener("click", parseVoice);
+}
+
+function speak(text) {
+  if (!("speechSynthesis" in window)) return;
+
+  window.speechSynthesis.cancel();
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "hi-IN";
+  utterance.rate = 0.95;
+
+  window.speechSynthesis.speak(utterance);
 }
 
 function startVoice() {
@@ -1056,6 +1307,7 @@ function startVoice() {
   }
 
   const recognition = new Recognition();
+
   recognition.lang = "hi-IN";
   recognition.interimResults = false;
   recognition.maxAlternatives = 1;
@@ -1076,28 +1328,23 @@ function startVoice() {
     $("voiceButton").classList.remove("listening");
   };
 
-  recognition.start();
-  $("voiceButton").classList.add("listening");
+  try {
+    recognition.start();
+    $("voiceButton").classList.add("listening");
+  } catch (error) {
+    showToast("Microphone could not start: " + error.message);
+  }
 }
 
 function parseVoice() {
-  const text = $("voiceText").value.trim();
+  const command = $("voiceText").value.trim();
 
-  if (!text) {
+  if (!command) {
     showToast("पहले अपना आदेश बोलें या लिखें।");
     return;
   }
 
-  const normalized = text.toLowerCase();
-
-  const quantityMatch = normalized.match(/\b\d+(?:\.\d+)?\b/);
-
-  if (!quantityMatch) {
-    showToast("Quantity समझ नहीं आई। कृपया संख्या लिखें।");
-    return;
-  }
-
-  const quantity = Number(quantityMatch[0]);
+  const normalized = command.toLowerCase();
 
   const person = state.people.find(p =>
     normalized.includes(String(p.PersonName).toLowerCase()) ||
@@ -1109,23 +1356,124 @@ function parseVoice() {
     normalized.includes(String(i.ItemCode).toLowerCase())
   );
 
-  if (!person || !item) {
-    $("voiceResult").innerHTML =
-      '<div class="empty-state">Employee या material नहीं मिला। कृपया सही नाम लिखें।</div>';
+  const isPendingQuestion =
+    /pending|बाकी|कितना बाकी|लंबित/.test(normalized);
+
+  const isStockQuestion =
+    /stock|स्टॉक|उपलब्ध|कितना है/.test(normalized);
+
+  const isReturn =
+    /return|वापस|लौटा/.test(normalized);
+
+  const isIssue =
+    /issue|दे दो|जारी|निकाल|भेज/.test(normalized);
+
+  if (isPendingQuestion && person && item) {
+    const pending = employeeItemOutstanding(person.EmployeeCode, item.ItemCode);
+
+    const answer =
+      `${person.PersonName} के पास ${item.ItemName} का pending issue ${pending} है।`;
+
+    $("voiceResult").textContent = answer;
+    speak(answer);
     return;
   }
 
-  const isReturn = /return|वापस|लौटा|return karo/.test(normalized);
-  const isIssue = /issue|दे दो|जारी|निकाल|भेज/.test(normalized);
+  if (isStockQuestion && item) {
+    const answer =
+      `${item.ItemName} का Fresh Stock ${number(item.AvailableStock)} है।`;
+
+    $("voiceResult").textContent = answer;
+    speak(answer);
+    return;
+  }
+
+  if (!person || !item) {
+    const message = "कर्मचारी या सामग्री नहीं मिली। कृपया सही नाम या कोड बोलें।";
+    $("voiceResult").textContent = message;
+    speak(message);
+    return;
+  }
+
+  const quantityMatch = normalized.match(/\b\d+(?:\.\d+)?\b/);
+
+  if (!quantityMatch) {
+    showToast("Quantity समझ नहीं आई।");
+    return;
+  }
+
+  const quantity = Number(quantityMatch[0]);
+
+  if (quantity <= 0) {
+    showToast("Quantity शून्य से अधिक होनी चाहिए।");
+    return;
+  }
+
+  if (!isIssue && !isReturn) {
+    showToast("Issue या Return का आदेश स्पष्ट नहीं है।");
+    return;
+  }
 
   if (isReturn) {
-    $("voiceResult").innerHTML =
-      `<div class="panel">Return command पहचाना गया। कृपया Material Return पेज पर जाकर मूल Issue चुनें।</div>`;
-    return;
-  }
+    const matchingIssues = getPendingIssues().filter(t =>
+      String(t.EmployeeCode) === String(person.EmployeeCode) &&
+      String(t.ItemCode) === String(item.ItemCode)
+    );
 
-  if (!isIssue) {
-    showToast("Issue आदेश स्पष्ट नहीं है।");
+    if (!matchingIssues.length) {
+      showToast("इस कर्मचारी के पास इस सामग्री का Pending Issue नहीं है।");
+      return;
+    }
+
+    const options = matchingIssues.map(t => `
+      <option value="${escapeAttribute(t.TxnID)}">
+        ${escapeHTML(t.TxnID)} - Pending ${number(getOutstanding(t.TxnID))}
+      </option>
+    `).join("");
+
+    $("voiceResult").innerHTML = `
+      <div class="panel">
+        <h2>Return की पुष्टि करें</h2>
+        <p>कर्मचारी: ${escapeHTML(person.PersonName)}</p>
+        <p>Material: ${escapeHTML(item.ItemName)}</p>
+        <label>Original Issue</label>
+        <select id="voiceReturnIssue">${options}</select>
+        <label>Quantity</label>
+        <input type="number" id="voiceReturnQty"
+          min="0.0001" step="any" value="${quantity}">
+        <button class="action-button" id="confirmVoiceReturn">
+          Confirm Return
+        </button>
+      </div>
+    `;
+
+    $("confirmVoiceReturn").addEventListener("click", async () => {
+      const issueTxnId = $("voiceReturnIssue").value;
+      const qty = Number($("voiceReturnQty").value);
+
+      if (qty <= 0 || qty > getOutstanding(issueTxnId)) {
+        showToast("Return quantity गलत है।");
+        return;
+      }
+
+      if (!confirm("क्या आप यह Return सेव करना चाहते हैं?")) return;
+
+      try {
+        await api("return", {
+          issueTxnId,
+          quantity: qty,
+          notes: "Voice Agent entry"
+        });
+
+        showToast("Voice Return saved.");
+        speak("Material Return सेव हो गया है।");
+        await navigate("voice");
+
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+
     return;
   }
 
@@ -1134,25 +1482,35 @@ function parseVoice() {
     item.ItemCode
   );
 
-  if (outstanding > 0) {
-    $("voiceResult").innerHTML =
-      '<div class="empty-state">इस व्यक्ति के पास यह material पहले से pending है। नियम के अनुसार दोबारा issue नहीं किया जा सकता।</div>';
+  if (outstanding > 0 && state.role !== "ADMIN") {
+    showToast("इस कर्मचारी के पास यह सामग्री पहले से Pending है।");
     return;
   }
 
   if (quantity > Number(item.AvailableStock || 0)) {
-    showToast("पर्याप्त stock उपलब्ध नहीं है।");
+    showToast("पर्याप्त Fresh Stock उपलब्ध नहीं है।");
     return;
   }
 
-  const result = $("voiceResult");
-
-  result.innerHTML = `
+  $("voiceResult").innerHTML = `
     <div class="panel">
-      <h2>आदेश की पुष्टि करें</h2>
+      <h2>Issue आदेश की पुष्टि करें</h2>
       <p>कर्मचारी: <strong>${escapeHTML(person.PersonName)}</strong></p>
+      <p>Employee Code: <strong>${escapeHTML(person.EmployeeCode)}</strong></p>
       <p>Material: <strong>${escapeHTML(item.ItemName)}</strong></p>
       <p>Quantity: <strong>${number(quantity)}</strong></p>
+
+      ${outstanding > 0 && state.role === "ADMIN" ? `
+        <div class="form-field">
+          <label>Admin Override Password</label>
+          <input type="password" id="voiceOverridePassword">
+        </div>
+        <div class="form-field">
+          <label>Override Reason</label>
+          <textarea id="voiceOverrideReason"></textarea>
+        </div>
+      ` : ""}
+
       <button class="action-button" id="confirmVoiceIssue">
         Confirm and Issue
       </button>
@@ -1167,18 +1525,157 @@ function parseVoice() {
         itemCode: item.ItemCode,
         employeeCode: person.EmployeeCode,
         quantity,
-        notes: "Voice Agent entry"
+        notes: "Voice Agent entry",
+        overridePassword: $("voiceOverridePassword")
+          ? $("voiceOverridePassword").value : "",
+        overrideReason: $("voiceOverrideReason")
+          ? $("voiceOverrideReason").value : ""
       });
 
-      showToast("Voice order issued successfully.");
-      $("voiceText").value = "";
-      $("voiceResult").innerHTML = "";
-      await refreshData();
+      showToast("Voice Issue saved.");
+      speak("Material Issue सफलतापूर्वक सेव हो गया है।");
+      await navigate("voice");
 
     } catch (error) {
       showToast(error.message);
+      speak(error.message);
     }
   });
+}
+
+/* =========================================================
+   QR / BARCODE SCANNER
+   ========================================================= */
+
+function scannerPanel(target) {
+  return `
+    <div class="panel scanner-panel">
+      <h2>QR / Barcode Scanner</h2>
+      <p>Material का QR Code या Barcode कैमरे से Scan करें।</p>
+
+      <button class="secondary-button" id="startScanner">
+        Start Scanner
+      </button>
+
+      <button class="secondary-button" id="stopScanner" hidden>
+        Stop Scanner
+      </button>
+
+      <video id="scannerVideo" autoplay playsinline
+        style="width:100%;max-width:450px;display:none"></video>
+
+      <p id="scannerStatus"></p>
+    </div>
+  `;
+}
+
+function setupScanner(target) {
+  if (!$("startScanner")) return;
+
+  $("startScanner").addEventListener("click", () => startScanner(target));
+  $("stopScanner").addEventListener("click", stopScanner);
+}
+
+async function startScanner(target) {
+  if (!("BarcodeDetector" in window)) {
+    showToast("इस browser में Barcode scanning उपलब्ध नहीं है।");
+    return;
+  }
+
+  try {
+    const formats = await BarcodeDetector.getSupportedFormats();
+
+    const supported = formats.filter(f =>
+      ["qr_code", "code_128", "code_39", "ean_13", "ean_8", "upc_a", "upc_e"].includes(f)
+    );
+
+    const detector = new BarcodeDetector({ formats: supported });
+
+    state.scannerStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" }
+    });
+
+    state.scannerActive = true;
+
+    const video = $("scannerVideo");
+    video.srcObject = state.scannerStream;
+    video.style.display = "block";
+
+    $("startScanner").hidden = true;
+    $("stopScanner").hidden = false;
+    $("scannerStatus").textContent = "Scanning...";
+
+    await video.play();
+
+    async function scanFrame() {
+      if (!state.scannerActive) return;
+
+      try {
+        const results = await detector.detect(video);
+
+        if (results.length) {
+          const value = results[0].rawValue;
+
+          stopScanner();
+          handleScannedCode(value, target);
+          return;
+        }
+
+      } catch (error) {
+        console.warn("Barcode scan error:", error);
+      }
+
+      if (state.scannerActive) {
+        requestAnimationFrame(scanFrame);
+      }
+    }
+
+    scanFrame();
+
+  } catch (error) {
+    stopScanner();
+    showToast("Camera permission or scanner error: " + error.message);
+  }
+}
+
+function stopScanner() {
+  state.scannerActive = false;
+
+  if (state.scannerStream) {
+    state.scannerStream.getTracks().forEach(track => track.stop());
+    state.scannerStream = null;
+  }
+
+  const video = $("scannerVideo");
+
+  if (video) {
+    video.pause();
+    video.srcObject = null;
+    video.style.display = "none";
+  }
+
+  if ($("startScanner")) $("startScanner").hidden = false;
+  if ($("stopScanner")) $("stopScanner").hidden = true;
+}
+
+function handleScannedCode(value, target) {
+  const item = findItem(value);
+
+  if (!item) {
+    showToast("Scanned code does not match any Item Code.");
+    return;
+  }
+
+  if (target === "issue") {
+    $("issueItemSearch").value = item.ItemCode;
+    updateOverrideVisibility();
+  }
+
+  if (target === "inward") {
+    $("inwardItem").value = item.ItemCode;
+  }
+
+  showToast("Material found: " + item.ItemName);
 }
 
 /* =========================================================
@@ -1187,57 +1684,70 @@ function parseVoice() {
 
 function renderSettings() {
   if (state.role !== "ADMIN") {
-    $("pageContent").innerHTML = '<div class="empty-state">Admin access required.</div>';
+    $("pageContent").innerHTML =
+      '<div class="empty-state">Admin access required.</div>';
     return;
   }
 
   $("pageContent").innerHTML = `
     <div class="panel">
       <h2>Change Login Password</h2>
+
       <form id="passwordForm">
         <div class="form-grid">
           <div class="form-field">
             <label>Current Password</label>
             <input type="password" id="oldPassword" required>
           </div>
+
           <div class="form-field">
             <label>New Password</label>
-            <input type="password" id="newPassword" minlength="10" required>
+            <input type="password" id="newPassword"
+              minlength="10" required>
           </div>
         </div>
+
         <button class="action-button">Change Password</button>
       </form>
     </div>
 
     <div class="panel">
       <h2>Change Override Password</h2>
+
       <form id="overrideForm">
         <div class="form-grid">
           <div class="form-field">
             <label>Current Override Password</label>
             <input type="password" id="oldOverridePassword" required>
           </div>
+
           <div class="form-field">
             <label>New Override Password</label>
-            <input type="password" id="newOverridePassword" minlength="10" required>
+            <input type="password" id="newOverridePassword"
+              minlength="10" required>
           </div>
         </div>
+
         <button class="action-button">Change Override Password</button>
       </form>
     </div>
 
     <div class="panel">
       <h2>Create User</h2>
+
       <form id="userForm">
         <div class="form-grid">
           <div class="form-field">
             <label>Username</label>
             <input id="newUsername" required>
           </div>
+
           <div class="form-field">
             <label>Password (minimum 10 characters)</label>
-            <input type="password" id="newUserPassword" minlength="10" required>
+            <input type="password" id="newUserPassword"
+              minlength="10" required>
           </div>
+
           <div class="form-field">
             <label>Role</label>
             <select id="newUserRole">
@@ -1246,6 +1756,7 @@ function renderSettings() {
             </select>
           </div>
         </div>
+
         <button class="action-button">Create User</button>
       </form>
     </div>
@@ -1253,27 +1764,31 @@ function renderSettings() {
     <div class="panel">
       <h2>Database Backup</h2>
       <p>Create a copy of the Google Spreadsheet in Google Drive.</p>
-      <button id="backupButton" class="action-button">Create Backup Now</button>
+      <button id="backupButton" class="action-button">
+        Create Backup Now
+      </button>
     </div>
 
     <div class="panel">
       <h2>Admin Correction</h2>
-      <p>Current Backend supports correction of transaction Notes only.</p>
       <form id="correctionForm">
         <div class="form-grid">
           <div class="form-field">
             <label>Transaction ID</label>
             <input id="correctionTxn" required>
           </div>
+
           <div class="form-field">
             <label>Correction Reason</label>
             <input id="correctionReason" required>
           </div>
+
           <div class="form-field full-width">
             <label>Corrected Notes</label>
             <textarea id="correctionNotes"></textarea>
           </div>
         </div>
+
         <button class="action-button">Save Notes Correction</button>
       </form>
     </div>
@@ -1337,6 +1852,7 @@ function renderSettings() {
     try {
       const result = await api("createBackup");
       showToast(result.message);
+
     } catch (error) {
       showToast(error.message);
     }
@@ -1362,27 +1878,21 @@ function renderSettings() {
 }
 
 /* =========================================================
-   HELPERS
+   SEARCH HELPERS
    ========================================================= */
 
-function statCard(label, value) {
+function itemDatalist() {
   return `
-    <div class="stat-card">
-      <div class="stat-label">${escapeHTML(label)}</div>
-      <div class="stat-value">${escapeHTML(value)}</div>
-    </div>
-  `;
-}
-
-function itemOptions() {
-  return `
-    <option value="">Select material</option>
-    ${state.items.map(item => `
-      <option value="${escapeAttribute(item.ItemCode)}">
-        ${escapeHTML(item.ItemName)} (${escapeHTML(item.ItemCode)})
-        — Available: ${number(item.AvailableStock)}
-      </option>
-    `).join("")}
+    <datalist id="itemList">
+      ${state.items.map(i => `
+        <option value="${escapeAttribute(i.ItemName)}">
+          ${escapeHTML(i.ItemCode)}
+        </option>
+        <option value="${escapeAttribute(i.ItemCode)}">
+          ${escapeHTML(i.ItemName)}
+        </option>
+      `).join("")}
+    </datalist>
   `;
 }
 
@@ -1406,7 +1916,17 @@ function findPerson(value) {
 
   return state.people.find(p =>
     String(p.PersonName).toLowerCase() === q ||
-    String(p.EmployeeCode).toLowerCase() === q
+    String(p.EmployeeCode).toLowerCase() === q ||
+    String(p.PersonID).toLowerCase() === q
+  );
+}
+
+function findItem(value) {
+  const q = String(value || "").trim().toLowerCase();
+
+  return state.items.find(i =>
+    String(i.ItemName).toLowerCase() === q ||
+    String(i.ItemCode).toLowerCase() === q
   );
 }
 
@@ -1420,8 +1940,21 @@ function employeeItemOutstanding(employeeCode, itemCode) {
     .reduce((sum, t) => sum + getOutstanding(t.TxnID), 0);
 }
 
+/* =========================================================
+   UI HELPERS
+   ========================================================= */
+
+function statCard(label, value) {
+  return `
+    <div class="stat-card">
+      <div class="stat-label">${escapeHTML(label)}</div>
+      <div class="stat-value">${escapeHTML(value)}</div>
+    </div>
+  `;
+}
+
 function table(headers, rows) {
-  if (!rows.length) {
+  if (!rows || !rows.length) {
     return '<div class="empty-state">No records found.</div>';
   }
 
@@ -1429,8 +1962,11 @@ function table(headers, rows) {
     <div class="table-wrap">
       <table>
         <thead>
-          <tr>${headers.map(h => `<th>${escapeHTML(h)}</th>`).join("")}</tr>
+          <tr>
+            ${headers.map(h => `<th>${escapeHTML(h)}</th>`).join("")}
+          </tr>
         </thead>
+
         <tbody>
           ${rows.map(row => `
             <tr>
@@ -1453,9 +1989,7 @@ function number(value) {
 
 function formatDate(value) {
   const d = new Date(value);
-
   if (isNaN(d.getTime())) return "-";
-
   return d.toLocaleString("en-IN");
 }
 
@@ -1474,13 +2008,15 @@ function escapeAttribute(value) {
 
 function showToast(message) {
   const toast = $("toast");
+  if (!toast) {
+    alert(message);
+    return;
+  }
 
   toast.textContent = message;
   toast.classList.add("show");
 
-  setTimeout(() => {
-    toast.classList.remove("show");
-  }, 3500);
+  setTimeout(() => toast.classList.remove("show"), 3500);
 }
 
 /* =========================================================
@@ -1494,18 +2030,9 @@ function downloadCSV(rows) {
   }
 
   const headers = [
-    "TxnID",
-    "Timestamp",
-    "Type",
-    "ItemCode",
-    "ItemName",
-    "Quantity",
-    "EmployeeCode",
-    "PersonName",
-    "Department",
-    "Reference",
-    "Notes",
-    "EnteredBy"
+    "TxnID", "Timestamp", "Type", "ItemCode", "ItemName",
+    "Quantity", "EmployeeCode", "PersonName", "Department",
+    "Reference", "Notes", "EnteredBy", "ReturnCondition"
   ];
 
   const csv = [
