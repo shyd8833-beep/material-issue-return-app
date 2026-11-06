@@ -393,6 +393,7 @@ async function navigate(page) {
     };
 
     renderers[page]();
+    enhanceSearchableDropdowns();
 
   } catch (error) {
     $("pageContent").innerHTML =
@@ -2639,6 +2640,55 @@ function statCard(label, value) {
     </div>
   `;
 }
+
+
+/* =========================================================
+   SEARCHABLE DROPDOWNS
+   Adds a lightweight search field to every native select.
+   Native select values/events remain unchanged.
+   ========================================================= */
+
+function enhanceSearchableDropdowns() {
+  const selects = $("pageContent").querySelectorAll("select");
+
+  selects.forEach(select => {
+    if (select.dataset.searchEnhanced === "true") return;
+    select.dataset.searchEnhanced = "true";
+
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "dropdown-search";
+    search.placeholder = "Search options...";
+    search.autocomplete = "off";
+    search.setAttribute("aria-label", "Search dropdown options");
+
+    select.parentNode.insertBefore(search, select);
+    search.addEventListener("input", () => {
+      const query = search.value.trim().toLocaleLowerCase();
+      Array.from(select.options).forEach(option => {
+        const matches = !query ||
+          option.textContent.toLocaleLowerCase().includes(query);
+        option.hidden = !matches;
+      });
+
+      const selected = select.options[select.selectedIndex];
+      if (selected && selected.hidden) {
+        const firstMatch = Array.from(select.options).find(option =>
+          !option.hidden && !option.disabled
+        );
+        select.selectedIndex = firstMatch ? firstMatch.index : -1;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    search.addEventListener("search", () => {
+      if (!search.value) {
+        Array.from(select.options).forEach(option => { option.hidden = false; });
+      }
+    });
+  });
+}
+
 
 function itemOptions() {
   return `
