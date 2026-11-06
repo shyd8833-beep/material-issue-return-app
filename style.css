@@ -1021,6 +1021,7 @@ tbody tr:last-child td {
 }
 
 @media (max-width: 768px) {
+  body.mobile-menu-open { overflow: hidden; }
   #mainScreen, .main-area, .main-content, #pageContent,
   .panel, .content-grid > *, .form-field, .table-wrap {
     min-width: 0;
