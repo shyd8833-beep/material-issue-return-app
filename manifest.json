@@ -1,13 +1,42 @@
-
 {
-  "name": "Material Issue Return App",
-  "short_name": "Material App",
-  "description": "Material Issue and Return Management",
+  "id": "./",
+  "name": "Material Issue & Return Management",
+  "short_name": "Material Manager",
+  "description": "Material Issue, Inward, Return and Stock Management Application",
+  "lang": "en-IN",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#1f4e78",
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
   "orientation": "any",
-  "icons": []
+  "background_color": "#f5f7fb",
+  "theme_color": "#2563eb",
+  "categories": [
+    "business",
+    "productivity",
+    "utilities"
+  ],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
 }
