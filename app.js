@@ -878,6 +878,23 @@ function getOutstanding(txnId) {
   );
 }
 
+function reusableReturnOptions() {
+  const rows = state.transactions.filter(t =>
+    t.Type === "RETURN" &&
+    String(t.ReturnCategory || "").toUpperCase() === "REUSABLE" &&
+    getReusablePending(t.TxnID) > 0
+  );
+  if (!rows.length) return '<option value="">No reusable returns pending transfer</option>';
+  return '<option value="">Select reusable return</option>' +
+    rows.map(t => `<option value="${escapeAttribute(t.TxnID)}">${escapeHTML(t.ItemName)} — ${number(getReusablePending(t.TxnID))} pending — ${formatDate(t.Timestamp)}</option>`).join("");
+}
+
+function getReusablePending(returnTxnId) {
+  const original = state.transactions.find(t => t.Type === "RETURN" && String(t.TxnID) === String(returnTxnId));
+  if (!original) return 0;
+  const transferred = state.transactions.filter(t => t.Type === "REUSABLE_TRANSFER" && String(t.RelatedTxnID) === String(returnTxnId)).reduce((sum, t) => sum + Number(t.Quantity || 0), 0);
+  return Math.max(0, Number(original.Quantity || 0) - transferred);
+}
 function renderReturn() {
   const pending = getPendingIssues();
 
@@ -1039,7 +1056,7 @@ function renderReturn() {
                 <div class="form-field">
                   <label>Material</label>
                   <select id="reusableItem" required>
-                    ${itemOptions()}
+                    ${reusableReturnOptions()}
                   </select>
                 </div>
 
@@ -1148,7 +1165,7 @@ async function classifyReturn(txnId) {
 
   try {
     await api("classifyReturn", {
-      txnId,
+      returnTxnId: txnId,
       category
     });
 
@@ -1164,10 +1181,10 @@ async function classifyReturn(txnId) {
 async function transferReusableStock(event) {
   event.preventDefault();
 
-  const itemCode = $("reusableItem").value;
+  const returnTxnId = $("reusableItem").value;
   const quantity = Number($("reusableQuantity").value);
 
-  if (!itemCode || !Number.isFinite(quantity) || quantity <= 0) {
+  if (!returnTxnId || !Number.isFinite(quantity) || quantity <= 0) {
     showToast("Valid material aur quantity select karein.");
     return;
   }
@@ -1180,7 +1197,7 @@ async function transferReusableStock(event) {
 
   try {
     await api("transferReusable", {
-      itemCode,
+      returnTxnId,
       quantity
     });
 
