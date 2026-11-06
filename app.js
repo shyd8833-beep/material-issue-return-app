@@ -2671,14 +2671,6 @@ function enhanceSearchableDropdowns() {
         option.hidden = !matches;
       });
 
-      const selected = select.options[select.selectedIndex];
-      if (selected && selected.hidden) {
-        const firstMatch = Array.from(select.options).find(option =>
-          !option.hidden && !option.disabled
-        );
-        select.selectedIndex = firstMatch ? firstMatch.index : -1;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-      }
     });
 
     search.addEventListener("search", () => {
