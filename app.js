@@ -35,6 +35,7 @@ const PAGE_INFO = {
   people: ["People", "Manage employees"],
   items: ["Items", "Manage material list"],
   reports: ["Reports", "Transaction reports"],
+  returnReports: ["Return Reports", "Material return summary and reports"],
   voice: ["Voice Agent", "Voice-assisted material entry"],
   settings: ["Admin Settings", "Account and administration"]
 };
@@ -386,6 +387,7 @@ async function navigate(page) {
       people: renderPeople,
       items: renderItems,
       reports: renderReports,
+      returnReports: renderReturnReports,
       voice: renderVoice,
       settings: renderSettings
     };
@@ -453,6 +455,11 @@ function renderDashboard() {
     </div>
 
     <div class="panel">
+      <h2>Material Return Summary</h2>
+      ${returnSummaryCards(state.transactions.filter(t => t.Type === "RETURN"))}
+    </div>
+
+    <div class="panel">
       <h2>Current Stock Summary</h2>
       ${stockTable(stock)}
     </div>
@@ -460,6 +467,32 @@ function renderDashboard() {
     <div class="panel">
       <h2>Pending Reusable Material</h2>
       ${reusableSummary()}
+    </div>
+  `;
+}
+
+
+function returnSummaryTotals(rows) {
+  const returns = rows.filter(t => t.Type === "RETURN");
+  return {
+    total: returns.reduce((sum, t) => sum + Number(t.Quantity || 0), 0),
+    reusable: returns.filter(t => String(t.ReturnCategory || "").toUpperCase() === "REUSABLE")
+      .reduce((sum, t) => sum + Number(t.Quantity || 0), 0),
+    damaged: returns.filter(t => String(t.ReturnCategory || "").toUpperCase() === "DAMAGED")
+      .reduce((sum, t) => sum + Number(t.Quantity || 0), 0),
+    pending: returns.filter(t => !["REUSABLE", "DAMAGED"].includes(String(t.ReturnCategory || "").toUpperCase()))
+      .reduce((sum, t) => sum + Number(t.Quantity || 0), 0)
+  };
+}
+
+function returnSummaryCards(rows) {
+  const totals = returnSummaryTotals(rows);
+  return `
+    <div class="stats-grid">
+      ${statCard("Total Returned", number(totals.total))}
+      ${statCard("Reusable", number(totals.reusable))}
+      ${statCard("Damaged", number(totals.damaged))}
+      ${statCard("Pending Classification", number(totals.pending))}
     </div>
   `;
 }
@@ -1730,6 +1763,119 @@ function renderReports() {
   });
 }
 
+
+
+/* =========================================================
+   MATERIAL RETURN REPORTS
+   ========================================================= */
+
+function renderReturnReports() {
+  $("pageContent").innerHTML = `
+    <div class="panel">
+      <h2>Material Return Reports</h2>
+      <p>Yahan sirf RETURN transactions ka summary aur detail dikhega.</p>
+      <form id="returnReportForm">
+        <div class="form-grid">
+          <div class="form-field">
+            <label>From Date</label>
+            <input type="date" id="returnReportFrom">
+          </div>
+          <div class="form-field">
+            <label>To Date</label>
+            <input type="date" id="returnReportTo">
+          </div>
+          <div class="form-field">
+            <label>Employee</label>
+            <select id="returnReportEmployee">
+              <option value="">All Employees</option>
+              ${state.people.map(p => `
+                <option value="${escapeAttribute(p.EmployeeCode)}">
+                  ${escapeHTML(p.PersonName)} (${escapeHTML(p.EmployeeCode)})
+                </option>
+              `).join("")}
+            </select>
+          </div>
+          <div class="form-field">
+            <label>Material</label>
+            <select id="returnReportItem">
+              <option value="">All Materials</option>
+              ${state.items.map(item => `
+                <option value="${escapeAttribute(item.ItemCode)}">
+                  ${escapeHTML(item.ItemName)} (${escapeHTML(item.ItemCode)})
+                </option>
+              `).join("")}
+            </select>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="action-button" type="submit">Generate Return Report</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="panel">
+      <div id="returnReportSummary"></div>
+      <div class="form-actions">
+        <button class="secondary-button" id="exportReturnReport" type="button">Export CSV</button>
+        <button class="secondary-button" id="printReturnReport" type="button">Print</button>
+      </div>
+      <div id="returnReportTable"></div>
+    </div>
+  `;
+
+  const generate = () => {
+    const from = $("returnReportFrom").value;
+    const to = $("returnReportTo").value;
+    const employee = $("returnReportEmployee").value;
+    const itemCode = $("returnReportItem").value;
+
+    const rows = state.transactions.filter(t => {
+      if (t.Type !== "RETURN") return false;
+      const d = new Date(t.Timestamp);
+      if (from && (!Number.isFinite(d.getTime()) || returnDateKey(d) < from)) return false;
+      if (to && (!Number.isFinite(d.getTime()) || returnDateKey(d) > to)) return false;
+      if (employee && String(t.EmployeeCode || "") !== employee) return false;
+      if (itemCode && String(t.ItemCode || "") !== itemCode) return false;
+      return true;
+    });
+
+    state.reportRows = rows;
+    const totals = returnSummaryTotals(rows);
+    $("returnReportSummary").innerHTML = returnSummaryCards(rows);
+    $("returnReportTable").innerHTML = rows.length
+      ? table(
+          ["Date", "Return ID", "Material", "Quantity", "Employee", "Employee Code", "Classification", "Reusable Transfer Pending"],
+          rows.map(t => [
+            formatDate(t.Timestamp),
+            t.TxnID || "-",
+            t.ItemName || "-",
+            number(t.Quantity),
+            t.PersonName || "-",
+            t.EmployeeCode || "-",
+            String(t.ReturnCategory || "").toUpperCase() || "PENDING",
+            String(t.ReturnCategory || "").toUpperCase() === "REUSABLE"
+              ? number(getReusablePending(t.TxnID))
+              : "-"
+          ])
+        )
+      : '<div class="empty-state">Selected filters ke liye koi return record nahi mila.</div>';
+  };
+
+  $("returnReportForm").addEventListener("submit", event => {
+    event.preventDefault();
+    generate();
+  });
+  $("exportReturnReport").addEventListener("click", () => downloadCSV(state.reportRows || []));
+  $("printReturnReport").addEventListener("click", () => window.print());
+  generate();
+}
+
+function returnDateKey(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return year + "-" + month + "-" + day;
+}
 
 /* =========================================================
    VOICE AGENT
