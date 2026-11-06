@@ -1021,6 +1021,15 @@ tbody tr:last-child td {
 }
 
 @media (max-width: 768px) {
+  #mainScreen, .main-area, .main-content, #pageContent,
+  .panel, .content-grid > *, .form-field, .table-wrap {
+    min-width: 0;
+  }
+  #pageContent { width: 100%; }
+  .table-wrap { max-width: 100%; }
+  #pageContent input, #pageContent select, #pageContent textarea,
+  #pageContent button { max-width: 100%; }
+
   :root {
     --header-height: 60px;
   }
@@ -1360,13 +1369,6 @@ tbody tr:last-child td {
    MOBILE RESPONSIVE LAYOUT
    Presentation-only overrides; desktop rules remain intact.
    ========================================================= */
-#mainScreen, .main-area, .main-content, #pageContent,
-.panel, .content-grid > *, .form-field, .table-wrap { min-width: 0; }
-#pageContent { width: 100%; }
-.table-wrap { max-width: 100%; }
-#pageContent input, #pageContent select, #pageContent textarea,
-#pageContent button { max-width: 100%; }
-
 @media (max-width: 768px) {
   html, body {
     width: 100%;
