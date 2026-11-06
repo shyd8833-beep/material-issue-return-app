@@ -1,4 +1,4 @@
-const CACHE_NAME = "material-manager-v1";
+const CACHE_NAME = "material-manager-v2";
 const APP_SHELL = ["./", "./index.html", "./style.css", "./app.js", "./manifest.json", "./icons/icon.svg"];
 
 self.addEventListener("install", event => {
