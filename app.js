@@ -2794,7 +2794,7 @@ function table(headers, rows) {
 
           ${rows.map(row => `
             <tr>
-              ${row.map(cell => `
+              ${row.map((cell, index) => `
                 <td data-label="${escapeAttribute(headers[index] || "")}">${safeCell(cell)}</td>
               `).join("")}
             </tr>
