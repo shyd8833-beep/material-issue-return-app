@@ -1,146 +1,342 @@
-
+```html
 <!DOCTYPE html>
-<html lang="hi">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#10243a">
-  <meta name="description" content="Material Issue and Return Management System">
-  <title>Material Management</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
 
+  <title>Material Issue & Return Management</title>
+
+  <meta name="description" content="Material Issue and Return Management System">
+  <meta name="theme-color" content="#142b52">
+
+  <!-- PWA Manifest -->
   <link rel="manifest" href="manifest.json">
-  <link rel="icon" href="icons/icon-192.png">
+
+  <!-- Main CSS -->
   <link rel="stylesheet" href="style.css">
+
+  <!-- Mobile PWA Support -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+
+  <!-- Main JavaScript -->
+  <script src="app.js" defer></script>
 </head>
 
 <body>
-  <div id="app">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark">M</div>
-        <div>
-          <div class="brand-name">Material Management</div>
-          <div class="brand-subtitle">Issue & Return Control Center</div>
-        </div>
+
+  <!-- ================= LOGIN SCREEN ================= -->
+
+  <section id="loginScreen" class="login-screen">
+
+    <div class="login-container">
+
+      <div class="login-brand">
+        <div class="brand-icon">M</div>
+        <h1>Material Management</h1>
+        <p>Issue & Return Management System</p>
       </div>
 
-      <div class="top-actions">
-        <span id="connectionStatus" class="status-pill">Connecting...</span>
-        <button id="installButton" class="install-button" hidden>
-          Install App
+      <form id="loginForm">
+
+        <div class="form-field">
+          <label for="username">Username</label>
+          <input
+            type="text"
+            id="username"
+            name="username"
+            placeholder="Enter username"
+            autocomplete="username"
+            required
+          >
+        </div>
+
+        <div class="form-field">
+          <label for="password">Password</label>
+          <input
+            type="password"
+            id="password"
+            name="password"
+            placeholder="Enter password"
+            autocomplete="current-password"
+            required
+          >
+        </div>
+
+        <button
+          type="submit"
+          id="loginButton"
+          class="action-button login-button"
+        >
+          Sign In
         </button>
-        <button id="logoutButton" class="logout-button" hidden>
+
+        <p id="loginMessage" class="login-message" role="alert"></p>
+
+      </form>
+
+      <div class="login-footer">
+        Material Issue & Return Management
+      </div>
+
+    </div>
+
+  </section>
+
+
+  <!-- ================= MAIN APPLICATION ================= -->
+
+  <div id="mainScreen" class="app-layout" hidden>
+
+    <!-- SIDEBAR -->
+
+    <aside id="sidebar" class="sidebar">
+
+      <div class="sidebar-brand">
+
+        <div class="brand-icon">M</div>
+
+        <div class="brand-text">
+          <h2>Material App</h2>
+          <span>Management System</span>
+        </div>
+
+      </div>
+
+
+      <!-- USER INFORMATION -->
+
+      <div class="sidebar-user">
+
+        <div id="userAvatar" class="user-avatar">U</div>
+
+        <div class="user-details">
+          <strong id="loggedInUser">User</strong>
+          <span id="loggedInRole">USER</span>
+        </div>
+
+      </div>
+
+
+      <!-- NAVIGATION -->
+
+      <nav class="sidebar-navigation">
+
+        <div class="nav-section-title">MAIN MENU</div>
+
+        <button
+          type="button"
+          class="nav-button active"
+          data-page="dashboard"
+        >
+          <span class="nav-icon">▦</span>
+          <span>Dashboard</span>
+        </button>
+
+        <button
+          type="button"
+          class="nav-button"
+          data-page="issue"
+        >
+          <span class="nav-icon">↗</span>
+          <span>Material Issue</span>
+        </button>
+
+        <button
+          type="button"
+          class="nav-button"
+          data-page="inward"
+        >
+          <span class="nav-icon">↙</span>
+          <span>Material Inward</span>
+        </button>
+
+        <button
+          type="button"
+          class="nav-button"
+          data-page="return"
+        >
+          <span class="nav-icon">↩</span>
+          <span>Material Return</span>
+        </button>
+
+        <button
+          type="button"
+          class="nav-button"
+          data-page="stock"
+        >
+          <span class="nav-icon">▤</span>
+          <span>Live Stock</span>
+        </button>
+
+        <button
+          type="button"
+          class="nav-button"
+          data-page="history"
+        >
+          <span class="nav-icon">◷</span>
+          <span>Transaction History</span>
+        </button>
+
+
+        <div class="nav-section-title">MANAGEMENT</div>
+
+        <button
+          type="button"
+          class="nav-button"
+          data-page="people"
+        >
+          <span class="nav-icon">♙</span>
+          <span>People</span>
+        </button>
+
+        <button
+          type="button"
+          class="nav-button"
+          data-page="items"
+        >
+          <span class="nav-icon">▣</span>
+          <span>Items</span>
+        </button>
+
+        <button
+          type="button"
+          class="nav-button"
+          data-page="reports"
+        >
+          <span class="nav-icon">▥</span>
+          <span>Advanced Reports</span>
+        </button>
+
+        <button
+          type="button"
+          class="nav-button"
+          data-page="voice"
+        >
+          <span class="nav-icon">🎙</span>
+          <span>Voice Agent</span>
+        </button>
+
+
+        <div class="nav-section-title">ADMINISTRATION</div>
+
+        <button
+          type="button"
+          class="nav-button"
+          data-page="settings"
+        >
+          <span class="nav-icon">⚙</span>
+          <span>Admin Settings</span>
+        </button>
+
+      </nav>
+
+
+      <!-- SIDEBAR FOOTER -->
+
+      <div class="sidebar-footer">
+
+        <div class="connection-indicator">
+          <span class="connection-dot"></span>
+          <span id="connectionStatus">Checking connection...</span>
+        </div>
+
+        <button
+          type="button"
+          id="logoutButton"
+          class="logout-button"
+          hidden
+        >
+          <span>⇥</span>
           Logout
         </button>
+
       </div>
-    </header>
 
-    <main>
-      <section id="loginScreen" class="login-screen">
-        <div class="login-card">
-          <div class="login-icon">M</div>
-          <h1>Welcome Back</h1>
-          <p>Sign in to Material Management</p>
+    </aside>
 
-          <form id="loginForm">
-            <label for="username">Username</label>
-            <input
-              id="username"
-              name="username"
-              type="text"
-              autocomplete="username"
-              placeholder="Enter username"
-              required
-            >
 
-            <label for="password">Password</label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              autocomplete="current-password"
-              placeholder="Enter password"
-              required
-            >
+    <!-- ================= MAIN CONTENT ================= -->
 
-            <button id="loginButton" type="submit" class="primary-button">
-              Sign In
-            </button>
-          </form>
+    <main class="main-area">
 
-          <p id="loginMessage" class="message" role="status"></p>
-          <div class="login-footer">Secure Material Issue & Return System</div>
-        </div>
-      </section>
+      <!-- TOP HEADER -->
 
-      <section id="mainScreen" hidden>
-        <aside class="sidebar">
-          <div class="sidebar-heading">WORKSPACE</div>
+      <header class="top-header">
 
-          <button class="nav-button active" data-page="dashboard">
-            <span>▦</span> Dashboard
-          </button>
-          <button class="nav-button" data-page="issue">
-            <span>↗</span> Material Issue
-          </button>
-          <button class="nav-button" data-page="inward">
-            <span>↓</span> Material Inward
-          </button>
-          <button class="nav-button" data-page="return">
-            <span>↩</span> Material Return
-          </button>
-          <button class="nav-button" data-page="stock">
-            <span>▤</span> Live Stock
-          </button>
-          <button class="nav-button" data-page="history">
-            <span>◷</span> Transaction History
-          </button>
+        <div class="header-left">
 
-          <div class="sidebar-heading">MANAGEMENT</div>
-
-          <button class="nav-button" data-page="people">
-            <span>♙</span> People
-          </button>
-          <button class="nav-button" data-page="items">
-            <span>▣</span> Items
-          </button>
-          <button class="nav-button" data-page="reports">
-            <span>▥</span> Reports
-          </button>
-          <button class="nav-button" data-page="voice">
-            <span>🎙</span> Voice Agent
-          </button>
-          <button class="nav-button" data-page="settings">
-            <span>⚙</span> Admin Settings
-          </button>
-        </aside>
-
-        <div class="workspace">
-          <div class="page-heading">
-            <div>
-              <div class="breadcrumb">Workspace / <span id="breadcrumbPage">Dashboard</span></div>
-              <h1 id="pageTitle">Dashboard</h1>
-              <p id="pageSubtitle">Your material management overview</p>
-            </div>
-            <div class="user-info">
-              <div id="userAvatar" class="avatar">U</div>
-              <div>
-                <strong id="loggedInUser">User</strong>
-                <small id="loggedInRole">User</small>
-              </div>
-            </div>
+          <div class="breadcrumb">
+            <span>Home</span>
+            <span class="breadcrumb-separator">/</span>
+            <strong id="breadcrumbPage">Dashboard</strong>
           </div>
 
-          <div id="pageContent" class="page-content">
-            <div class="loading-panel">Loading dashboard...</div>
-          </div>
+          <h1 id="pageTitle">Dashboard</h1>
+
+          <p id="pageSubtitle">
+            Material management overview
+          </p>
+
         </div>
+
+
+        <div class="header-actions">
+
+          <button
+            type="button"
+            id="installButton"
+            class="install-button"
+            hidden
+          >
+            <span>↓</span>
+            Install App
+          </button>
+
+        </div>
+
+      </header>
+
+
+      <!-- PAGE CONTENT -->
+
+      <section class="main-content">
+
+        <div id="pageContent">
+
+          <div class="loading-panel">
+            Loading application...
+          </div>
+
+        </div>
+
       </section>
+
+
+      <!-- FOOTER -->
+
+      <footer class="app-footer">
+        <span>Material Issue & Return Management</span>
+        <span>Secure Management System</span>
+      </footer>
+
     </main>
 
-    <div id="toast" class="toast" role="status"></div>
   </div>
 
-  <script src="app.js" defer></script>
+
+  <!-- ================= TOAST MESSAGE ================= -->
+
+  <div
+    id="toast"
+    class="toast"
+    role="status"
+    aria-live="polite"
+  ></div>
+
+
 </body>
 </html>
+```
