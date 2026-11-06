@@ -1,8 +1,8 @@
 
 /************************************************************
- * MATERIAL ISSUE & RETURN APP
- * Frontend Version 2.0
- * Backend: Cloudflare Worker + Google Apps Script
+ * MATERIAL ISSUE & RETURN MANAGEMENT APP
+ * Frontend Version 2.0.0
+ * API: Cloudflare Worker + Google Apps Script
  ************************************************************/
 
 const API_URL = "https://material-issue-api.shyd8833.workers.dev";
@@ -18,9 +18,9 @@ const state = {
   dashboard: null,
   reportRows: [],
   deferredInstall: null,
+  scanner: null,
   scannerStream: null,
-  scannerActive: false,
-  pendingVoiceCommand: null
+  toastTimer: null
 };
 
 const $ = id => document.getElementById(id);
@@ -28,16 +28,20 @@ const $ = id => document.getElementById(id);
 const PAGE_INFO = {
   dashboard: ["Dashboard", "Material management overview"],
   issue: ["Material Issue", "Issue material to an employee"],
-  inward: ["Material Inward", "Add material to Fresh Stock"],
-  return: ["Material Return", "Record returned material"],
-  stock: ["Live Stock", "Fresh, pending and returned stock"],
+  inward: ["Material Inward", "Add material to stock"],
+  return: ["Material Return", "Record and classify material returns"],
+  stock: ["Live Stock", "Current material availability"],
   history: ["Transaction History", "All material transactions"],
   people: ["People", "Manage employees"],
   items: ["Items", "Manage material list"],
   reports: ["Reports", "Transaction reports"],
-  voice: ["Voice Agent", "Voice-assisted material management"],
+  voice: ["Voice Agent", "Voice-assisted material entry"],
   settings: ["Admin Settings", "Account and administration"]
 };
+
+const isAdmin = () =>
+  String(state.role || "").toUpperCase() === "ADMIN";
+
 
 /* =========================================================
    STARTUP
@@ -46,16 +50,33 @@ const PAGE_INFO = {
 document.addEventListener("DOMContentLoaded", init);
 
 function init() {
-  $("connectionStatus").textContent = "Checking connection...";
+  const requiredIds = [
+    "connectionStatus",
+    "loginForm",
+    "logoutButton",
+    "installButton",
+    "loginScreen",
+    "mainScreen",
+    "pageContent",
+    "toast"
+  ];
+
+  const missing = requiredIds.filter(id => !$(id));
+
+  if (missing.length) {
+    console.error("Missing HTML elements:", missing);
+    return;
+  }
 
   $("loginForm").addEventListener("submit", login);
   $("logoutButton").addEventListener("click", logout);
+  $("installButton").addEventListener("click", installApp);
 
   document.querySelectorAll(".nav-button").forEach(button => {
-    button.addEventListener("click", () => navigate(button.dataset.page));
+    button.addEventListener("click", () => {
+      navigate(button.dataset.page);
+    });
   });
-
-  $("installButton").addEventListener("click", installApp);
 
   window.addEventListener("beforeinstallprompt", event => {
     event.preventDefault();
@@ -64,11 +85,11 @@ function init() {
   });
 
   window.addEventListener("appinstalled", () => {
-    showToast("App installed successfully.");
+    state.deferredInstall = null;
     $("installButton").hidden = true;
+    showToast("App installed successfully.");
   });
 
-  registerServiceWorker();
   testConnection();
 
   const saved = sessionStorage.getItem("material_session");
@@ -76,51 +97,74 @@ function init() {
   if (saved) {
     try {
       const data = JSON.parse(saved);
-      state.token = data.token;
-      state.username = data.username;
-      state.role = data.role;
-      openApplication();
+
+      if (data.token) {
+        state.token = data.token;
+        state.username = data.username || "";
+        state.role = data.role || "";
+
+        openApplication();
+      }
     } catch (error) {
       sessionStorage.removeItem("material_session");
     }
   }
+
+  registerServiceWorker();
 }
 
-async function registerServiceWorker() {
-  if (!("serviceWorker" in navigator)) return;
-
-  try {
-    await navigator.serviceWorker.register("./service-worker.js");
-  } catch (error) {
-    console.warn("Service worker registration failed:", error);
-  }
-}
 
 /* =========================================================
    API CONNECTION
    ========================================================= */
 
 async function api(action, data = {}) {
-  const response = await fetch(API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      action,
-      token: state.token,
-      ...data
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error("Server connection failed: " + response.status);
+  if (!action) {
+    throw new Error("API action is missing.");
   }
 
-  const result = await response.json();
+  const payload = {
+    action,
+    token: state.token,
+    ...data
+  };
 
-  if (!result.success) {
-    throw new Error(result.message || "Request failed.");
+  let response;
+
+  try {
+    response = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain;charset=UTF-8"
+      },
+      body: JSON.stringify(payload)
+    });
+  } catch (error) {
+    throw new Error(
+      "Backend connection failed. Internet aur Worker URL check karein."
+    );
+  }
+
+  let result;
+
+  try {
+    result = await response.json();
+  } catch (error) {
+    throw new Error("Backend ne valid JSON response nahi diya.");
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      result.message || "Server request failed."
+    );
+  }
+
+  if (!result || result.success !== true) {
+    throw new Error(
+      result && result.message
+        ? result.message
+        : "Request failed."
+    );
   }
 
   return result;
@@ -131,14 +175,20 @@ async function testConnection() {
     const response = await fetch(API_URL);
     const result = await response.json();
 
-    if (!result.success) throw new Error("Backend unavailable");
+    if (!response.ok || !result.success) {
+      throw new Error("Backend unavailable.");
+    }
 
     $("connectionStatus").textContent = "Connected";
+    $("connectionStatus").classList.add("connected");
+
   } catch (error) {
     $("connectionStatus").textContent = "Connection error";
-    showToast("Backend connection failed: " + error.message);
+    $("connectionStatus").classList.remove("connected");
+    console.error(error);
   }
 }
+
 
 /* =========================================================
    LOGIN / LOGOUT
@@ -150,40 +200,67 @@ async function login(event) {
   const username = $("username").value.trim();
   const password = $("password").value;
 
+  if (!username || !password) {
+    showToast("Username aur password enter karein.");
+    return;
+  }
+
   $("loginButton").disabled = true;
   $("loginButton").textContent = "Signing in...";
   $("loginMessage").textContent = "";
 
   try {
-    const result = await api("login", { username, password });
+    const result = await api("login", {
+      username,
+      password
+    });
+
+    if (!result.token) {
+      throw new Error("Login token receive nahi hua.");
+    }
 
     state.token = result.token;
-    state.username = result.username;
-    state.role = result.role;
+    state.username = result.username || username;
+    state.role = result.role || "";
 
-    sessionStorage.setItem("material_session", JSON.stringify({
-      token: state.token,
-      username: state.username,
-      role: state.role
-    }));
+    sessionStorage.setItem(
+      "material_session",
+      JSON.stringify({
+        token: state.token,
+        username: state.username,
+        role: state.role
+      })
+    );
 
     $("password").value = "";
+
     await openApplication();
 
   } catch (error) {
     $("loginMessage").textContent = error.message;
+
   } finally {
     $("loginButton").disabled = false;
     $("loginButton").textContent = "Sign In";
   }
 }
 
-function logout() {
-  stopScanner();
+async function logout() {
+  try {
+    if (state.token) {
+      await api("logout");
+    }
+  } catch (error) {
+    console.warn("Logout API:", error.message);
+  }
 
   state.token = "";
   state.username = "";
   state.role = "";
+  state.items = [];
+  state.people = [];
+  state.transactions = [];
+  state.dashboard = null;
 
   sessionStorage.removeItem("material_session");
 
@@ -194,6 +271,10 @@ function logout() {
   $("loginMessage").textContent = "";
   $("username").value = "";
   $("password").value = "";
+
+  document.querySelectorAll(".nav-button").forEach(button => {
+    button.hidden = false;
+  });
 }
 
 async function openApplication() {
@@ -203,54 +284,86 @@ async function openApplication() {
 
   $("loggedInUser").textContent = state.username;
   $("loggedInRole").textContent = state.role;
-  $("userAvatar").textContent = state.username.charAt(0).toUpperCase();
+  $("userAvatar").textContent =
+    (state.username || "U").charAt(0).toUpperCase();
+
+  applyRolePermissions();
+
+  try {
+    await refreshData();
+    await navigate("dashboard");
+
+  } catch (error) {
+    showToast(error.message);
+    await logout();
+  }
+}
+
+function applyRolePermissions() {
+  const adminPages = ["settings", "people", "items"];
 
   document.querySelectorAll(".nav-button").forEach(button => {
     const page = button.dataset.page;
 
     button.hidden =
-      state.role !== "ADMIN" &&
-      ["settings", "people", "items"].includes(page);
+      adminPages.includes(page) && !isAdmin();
   });
-
-  try {
-    await refreshData();
-    await navigate("dashboard");
-  } catch (error) {
-    showToast(error.message);
-    logout();
-  }
 }
+
 
 /* =========================================================
    DATA REFRESH
    ========================================================= */
 
 async function refreshData() {
-  const [items, people, transactions, dashboard] = await Promise.all([
-    api("listItems"),
-    api("listPeople"),
-    api("listTransactions"),
-    api("dashboard")
-  ]);
+  const [items, people, transactions, dashboard] =
+    await Promise.all([
+      api("listItems"),
+      api("listPeople"),
+      api("listTransactions"),
+      api("dashboard")
+    ]);
 
-  state.items = items.items || [];
-  state.people = people.people || [];
-  state.transactions = transactions.transactions || [];
+  state.items = Array.isArray(items.items)
+    ? items.items
+    : [];
+
+  state.people = Array.isArray(people.people)
+    ? people.people
+    : [];
+
+  state.transactions = Array.isArray(transactions.transactions)
+    ? transactions.transactions
+    : [];
+
   state.dashboard = dashboard;
-
-  checkStockAlerts();
 }
+
+
+/* =========================================================
+   NAVIGATION
+   ========================================================= */
 
 async function navigate(page) {
   if (!PAGE_INFO[page]) return;
+
+  if (
+    ["settings", "people", "items"].includes(page) &&
+    !isAdmin()
+  ) {
+    showToast("Admin access required.");
+    return;
+  }
 
   stopScanner();
 
   state.page = page;
 
   document.querySelectorAll(".nav-button").forEach(button => {
-    button.classList.toggle("active", button.dataset.page === page);
+    button.classList.toggle(
+      "active",
+      button.dataset.page === page
+    );
   });
 
   $("breadcrumbPage").textContent = PAGE_INFO[page][0];
@@ -285,61 +398,92 @@ async function navigate(page) {
   }
 }
 
+
 /* =========================================================
    DASHBOARD
    ========================================================= */
 
 function renderDashboard() {
-  const d = state.dashboard;
+  const d = state.dashboard || {};
+
+  const lowStock = Array.isArray(d.lowStock)
+    ? d.lowStock
+    : [];
+
+  const stock = Array.isArray(d.stock)
+    ? d.stock
+    : state.items;
 
   $("pageContent").innerHTML = `
     <div class="stats-grid">
-      ${statCard("Total Items", d.totalItems)}
-      ${statCard("Total People", d.totalPeople)}
-      ${statCard("Fresh Stock", number(d.availableStock))}
-      ${statCard("Pending Issue", number(d.activeIssues))}
+      ${statCard("Total Items", d.totalItems || 0)}
+      ${statCard("Total People", d.totalPeople || 0)}
+      ${statCard("Available Stock", number(d.availableStock))}
+      ${statCard("Active Issues", number(d.activeIssues))}
     </div>
 
-    <div class="stats-grid">
-      ${statCard("Returned / Used", number(d.returnedStock))}
-      ${statCard("Reusable Pending", number(d.reusablePending))}
-      ${statCard("Damaged Material", number(d.damagedStock))}
-      ${statCard("Today's Transactions", number(d.todayTransactions))}
-    </div>
+    <div class="content-grid">
 
-    <div class="panel">
-      <h2>Low Stock Alerts</h2>
-      ${d.lowStock && d.lowStock.length
-        ? table(
-            ["Item Code", "Material", "Fresh Stock", "Minimum"],
-            d.lowStock.map(x => [
-              x.ItemCode,
-              x.ItemName,
-              number(x.FreshStock),
-              number(x.MinStock)
-            ])
-          )
-        : '<div class="empty-state">No low-stock alerts.</div>'}
+      <div class="panel">
+        <h2>Low Stock Alerts</h2>
+
+        ${
+          lowStock.length
+            ? table(
+                ["Item Code", "Material", "Available", "Minimum"],
+                lowStock.map(item => [
+                  item.ItemCode,
+                  item.ItemName,
+                  number(item.AvailableStock),
+                  number(item.MinStock)
+                ])
+              )
+            : '<div class="empty-state">No low-stock alerts.</div>'
+        }
+      </div>
+
+      <div class="panel">
+        <h2>Today's Activity</h2>
+        <div class="stat-value">
+          ${number(d.todayTransactions)}
+        </div>
+        <p>Transactions recorded today</p>
+      </div>
+
     </div>
 
     <div class="panel">
       <h2>Current Stock Summary</h2>
-      ${stockTable(d.stock || [])}
+      ${stockTable(stock)}
+    </div>
+
+    <div class="panel">
+      <h2>Pending Reusable Material</h2>
+      ${reusableSummary()}
     </div>
   `;
 }
 
-function checkStockAlerts() {
-  if (!state.dashboard || !state.dashboard.lowStock) return;
+function reusableSummary() {
+  const pending = state.transactions.filter(t =>
+    t.Type === "RETURN" &&
+    String(t.ReturnCategory || "").toUpperCase() === "REUSABLE"
+  );
 
-  const count = state.dashboard.lowStock.length;
-
-  if (count > 0) {
-    document.title = `(${count}) Low Stock - Material App`;
-  } else {
-    document.title = "Material Issue Return App";
+  if (!pending.length) {
+    return '<div class="empty-state">No reusable material pending.</div>';
   }
+
+  return table(
+    ["Material", "Quantity", "Return Date"],
+    pending.map(t => [
+      t.ItemName,
+      number(t.Quantity),
+      formatDate(t.Timestamp)
+    ])
+  );
 }
+
 
 /* =========================================================
    MATERIAL ISSUE
@@ -351,43 +495,63 @@ function renderIssue() {
       <h2>Issue Material</h2>
 
       <form id="issueForm">
+
         <div class="form-grid">
 
           <div class="form-field">
             <label>Employee Name or Employee Code</label>
-            <input list="peopleList" id="issueEmployee"
-              placeholder="Search employee" required>
+
+            <input
+              list="peopleList"
+              id="issueEmployee"
+              placeholder="Search employee name or code"
+              autocomplete="off"
+              required
+            >
+
             ${peopleDatalist()}
-            <small id="personIdInfo"></small>
+
+            <small id="selectedPersonInfo"></small>
           </div>
 
           <div class="form-field">
             <label>Material</label>
-            <input list="itemList" id="issueItemSearch"
-              placeholder="Search material name or code" required>
-            ${itemDatalist()}
+
+            <select id="issueItem" required>
+              ${itemOptions()}
+            </select>
           </div>
 
           <div class="form-field">
             <label>Quantity</label>
-            <input type="number" id="issueQuantity"
-              min="0.0001" step="any" required>
+
+            <input
+              type="number"
+              id="issueQuantity"
+              min="0.0001"
+              step="any"
+              required
+            >
           </div>
 
           <div class="form-field">
             <label>Reference</label>
-            <input id="issueReference" placeholder="Optional reference">
+            <input id="issueReference">
           </div>
 
           <div class="form-field full-width">
             <label>Notes</label>
             <textarea id="issueNotes"></textarea>
           </div>
+
         </div>
 
         <div id="overrideFields" hidden class="panel">
           <h2>Admin Override</h2>
-          <p>This employee already has this material pending return.</p>
+
+          <p>
+            This employee already has this material pending return.
+          </p>
 
           <div class="form-field">
             <label>Admin Override Password</label>
@@ -401,46 +565,100 @@ function renderIssue() {
         </div>
 
         <div class="form-actions">
-          <button class="action-button" type="submit">Issue Material</button>
+          <button class="action-button" type="submit">
+            Issue Material
+          </button>
+
+          <button
+            class="secondary-button"
+            type="button"
+            id="scanIssueItem"
+          >
+            Scan QR / Barcode
+          </button>
         </div>
+
       </form>
 
+      <div id="issueScanner" hidden></div>
       <p id="issueMessage" class="message"></p>
-    </div>
 
-    ${scannerPanel("issue")}
+    </div>
   `;
 
   $("issueForm").addEventListener("submit", submitIssue);
-  $("issueEmployee").addEventListener("input", updateIssueInfo);
-  $("issueItemSearch").addEventListener("input", updateOverrideVisibility);
-  $("issueEmployee").addEventListener("change", updateIssueInfo);
 
-  setupScanner("issue");
+  $("issueEmployee").addEventListener(
+    "input",
+    updateSelectedPerson
+  );
+
+  $("issueItem").addEventListener(
+    "change",
+    updateOverrideVisibility
+  );
+
+  $("scanIssueItem").addEventListener(
+    "click",
+    () => startScanner("issueItem")
+  );
 }
 
-function updateIssueInfo() {
-  const person = findPerson($("issueEmployee").value);
+function updateSelectedPerson() {
+  const value = $("issueEmployee").value;
+  const matches = findPeople(value);
 
-  $("personIdInfo").textContent = person
-    ? `PersonID: ${person.PersonID} | Employee Code: ${person.EmployeeCode}`
-    : "Employee not selected";
+  const info = $("selectedPersonInfo");
+
+  if (matches.length === 1) {
+    const person = matches[0];
+
+    info.textContent =
+      "Person ID: " + person.PersonID +
+      " | Employee Code: " + person.EmployeeCode;
+
+  } else if (matches.length > 1) {
+    info.textContent =
+      "Multiple employees found. Employee Code se exact employee select karein.";
+
+  } else {
+    info.textContent = "";
+  }
 
   updateOverrideVisibility();
 }
 
+function findPeople(value) {
+  const q = String(value || "").trim().toLowerCase();
+
+  if (!q) return [];
+
+  return state.people.filter(p =>
+    String(p.PersonName || "").trim().toLowerCase() === q ||
+    String(p.EmployeeCode || "").trim().toLowerCase() === q
+  );
+}
+
+function findPerson(value) {
+  const matches = findPeople(value);
+
+  return matches.length === 1
+    ? matches[0]
+    : null;
+}
+
 function updateOverrideVisibility() {
   const person = findPerson($("issueEmployee").value);
-  const item = findItem($("issueItemSearch").value);
+  const itemCode = $("issueItem").value;
 
-  if (!person || !item || state.role !== "ADMIN") {
+  if (!person || !itemCode || !isAdmin()) {
     $("overrideFields").hidden = true;
     return;
   }
 
   const outstanding = employeeItemOutstanding(
-    person.EmployeeCode,
-    item.ItemCode
+    person,
+    itemCode
   );
 
   $("overrideFields").hidden = outstanding <= 0;
@@ -450,34 +668,49 @@ async function submitIssue(event) {
   event.preventDefault();
 
   const person = findPerson($("issueEmployee").value);
-  const item = findItem($("issueItemSearch").value);
 
   if (!person) {
-    showToast("Select a valid employee.");
+    showToast(
+      "Employee ko exact Name ya Employee Code se select karein."
+    );
     return;
   }
 
-  if (!item) {
-    showToast("Select a valid material.");
-    return;
-  }
-
+  const itemCode = $("issueItem").value;
   const quantity = Number($("issueQuantity").value);
 
-  if (!Number.isFinite(quantity) || quantity <= 0) {
-    showToast("Enter a valid quantity.");
+  if (!itemCode || !Number.isFinite(quantity) || quantity <= 0) {
+    showToast("Valid material aur quantity select karein.");
+    return;
+  }
+
+  const item = state.items.find(x =>
+    String(x.ItemCode) === String(itemCode)
+  );
+
+  if (!item) {
+    showToast("Material nahi mila.");
+    return;
+  }
+
+  const available = Number(item.AvailableStock || 0);
+
+  if (quantity > available) {
+    showToast("Insufficient stock. Available: " + available);
     return;
   }
 
   const outstanding = employeeItemOutstanding(
-    person.EmployeeCode,
-    item.ItemCode
+    person,
+    itemCode
   );
 
   const override = outstanding > 0;
 
-  if (override && state.role !== "ADMIN") {
-    showToast("This employee already has this item pending return.");
+  if (override && !isAdmin()) {
+    showToast(
+      "Is employee ke paas ye item pehle se pending hai."
+    );
     return;
   }
 
@@ -489,24 +722,24 @@ async function submitIssue(event) {
     overrideReason = $("overrideReason").value.trim();
 
     if (!overridePassword || !overrideReason) {
-      showToast("Override password and reason are required.");
+      showToast(
+        "Override password aur reason dono zaroori hain."
+      );
       return;
     }
   }
 
-  if (quantity > Number(item.AvailableStock)) {
-    showToast("Insufficient Fresh Stock.");
+  if (!confirm(
+    `Issue ${quantity} ${item.ItemName} to ${person.PersonName} (${person.EmployeeCode})?`
+  )) {
     return;
   }
 
-  if (!confirm(
-    `Issue ${quantity} ${item.ItemName} to ${person.PersonName} (${person.EmployeeCode})?`
-  )) return;
-
   try {
     await api("issue", {
-      itemCode: item.ItemCode,
+      itemCode,
       employeeCode: person.EmployeeCode,
+      personId: person.PersonID,
       quantity,
       reference: $("issueReference").value,
       notes: $("issueNotes").value,
@@ -515,12 +748,14 @@ async function submitIssue(event) {
     });
 
     showToast("Material issued successfully.");
+
     await navigate("issue");
 
   } catch (error) {
     showToast(error.message);
   }
 }
+
 
 /* =========================================================
    MATERIAL INWARD
@@ -529,22 +764,31 @@ async function submitIssue(event) {
 function renderInward() {
   $("pageContent").innerHTML = `
     <div class="panel">
-      <h2>Material Inward - Fresh Stock</h2>
+
+      <h2>Material Inward</h2>
 
       <form id="inwardForm">
+
         <div class="form-grid">
 
           <div class="form-field">
             <label>Material</label>
-            <input list="itemList" id="inwardItem"
-              placeholder="Search material" required>
-            ${itemDatalist()}
+
+            <select id="inwardItem" required>
+              ${itemOptions()}
+            </select>
           </div>
 
           <div class="form-field">
             <label>Quantity</label>
-            <input type="number" id="inwardQuantity"
-              min="0.0001" step="any" required>
+
+            <input
+              type="number"
+              id="inwardQuantity"
+              min="0.0001"
+              step="any"
+              required
+            >
           </div>
 
           <div class="form-field">
@@ -560,42 +804,44 @@ function renderInward() {
         </div>
 
         <div class="form-actions">
-          <button class="action-button">Save Inward</button>
+          <button class="action-button" type="submit">
+            Save Inward
+          </button>
         </div>
-      </form>
-    </div>
 
-    ${scannerPanel("inward")}
+      </form>
+
+    </div>
   `;
 
   $("inwardForm").addEventListener("submit", async event => {
     event.preventDefault();
 
-    const item = findItem($("inwardItem").value);
+    const quantity = Number($("inwardQuantity").value);
 
-    if (!item) {
-      showToast("Select a valid material.");
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      showToast("Valid quantity enter karein.");
       return;
     }
 
     try {
       await api("inward", {
-        itemCode: item.ItemCode,
-        quantity: Number($("inwardQuantity").value),
+        itemCode: $("inwardItem").value,
+        quantity,
         reference: $("inwardReference").value,
         notes: $("inwardNotes").value
       });
 
-      showToast("Material inward saved to Fresh Stock.");
+      showToast("Material inward saved.");
+
       await navigate("inward");
 
     } catch (error) {
       showToast(error.message);
     }
   });
-
-  setupScanner("inward");
 }
+
 
 /* =========================================================
    MATERIAL RETURN
@@ -603,74 +849,113 @@ function renderInward() {
 
 function getPendingIssues() {
   return state.transactions.filter(t =>
-    t.Type === "ISSUE" && getOutstanding(t.TxnID) > 0
+    t.Type === "ISSUE" &&
+    getOutstanding(t.TxnID) > 0
   );
 }
 
 function getOutstanding(txnId) {
   const issue = state.transactions.find(t =>
-    t.TxnID === txnId && t.Type === "ISSUE"
+    t.TxnID === txnId &&
+    t.Type === "ISSUE"
   );
 
   if (!issue) return 0;
 
   const returned = state.transactions
-    .filter(t => t.Type === "RETURN" && t.RelatedTxnID === txnId)
-    .reduce((sum, t) => sum + Number(t.Quantity || 0), 0);
+    .filter(t =>
+      t.Type === "RETURN" &&
+      String(t.RelatedTxnID) === String(txnId)
+    )
+    .reduce(
+      (sum, t) => sum + Number(t.Quantity || 0),
+      0
+    );
 
-  return Math.max(0, Number(issue.Quantity || 0) - returned);
+  return Math.max(
+    0,
+    Number(issue.Quantity || 0) - returned
+  );
 }
 
 function renderReturn() {
   const pending = getPendingIssues();
 
-  const returnedRows = state.transactions.filter(t =>
-    t.Type === "RETURN"
+  const unclassified = state.transactions.filter(t =>
+    t.Type === "RETURN" &&
+    !["REUSABLE", "DAMAGED"].includes(
+      String(t.ReturnCategory || "").toUpperCase()
+    )
   );
 
   $("pageContent").innerHTML = `
+
     <div class="panel">
       <h2>Pending Material Returns</h2>
 
-      ${pending.length ? table(
-        ["Employee", "Employee Code", "Material", "Issued", "Pending", "Action"],
-        pending.map(issue => [
-          issue.PersonName,
-          issue.EmployeeCode,
-          issue.ItemName,
-          number(issue.Quantity),
-          number(getOutstanding(issue.TxnID)),
-          `<button class="secondary-button"
-            onclick="selectReturn('${escapeAttribute(issue.TxnID)}')">
-            Return
-          </button>`
-        ])
-      ) : '<div class="empty-state">No pending returns.</div>'}
+      ${
+        pending.length
+          ? table(
+              [
+                "Employee",
+                "Employee Code",
+                "Material",
+                "Issued",
+                "Pending",
+                "Action"
+              ],
+              pending.map(issue => [
+                issue.PersonName,
+                issue.EmployeeCode,
+                issue.ItemName,
+                number(issue.Quantity),
+                number(getOutstanding(issue.TxnID)),
+                `<button
+                  type="button"
+                  class="secondary-button"
+                  data-return-id="${escapeAttribute(issue.TxnID)}"
+                >Return</button>`
+              ])
+            )
+          : '<div class="empty-state">No pending returns.</div>'
+      }
     </div>
 
     <div class="panel">
       <h2>Record Material Return</h2>
 
       <form id="returnForm">
+
         <div class="form-grid">
+
           <div class="form-field full-width">
             <label>Original Issue</label>
+
             <select id="returnIssue" required>
               <option value="">Select pending issue</option>
+
               ${pending.map(t => `
                 <option value="${escapeAttribute(t.TxnID)}">
-                  ${escapeHTML(t.PersonName)} (${escapeHTML(t.EmployeeCode)})
+                  ${escapeHTML(t.PersonName)}
+                  (${escapeHTML(t.EmployeeCode)})
                   — ${escapeHTML(t.ItemName)}
                   — Pending ${number(getOutstanding(t.TxnID))}
                 </option>
               `).join("")}
+
             </select>
           </div>
 
           <div class="form-field">
             <label>Return Quantity</label>
-            <input type="number" id="returnQuantity"
-              min="0.0001" step="any" required>
+
+            <input
+              type="number"
+              id="returnQuantity"
+              min="0.0001"
+              step="any"
+              required
+            >
           </div>
 
           <div class="form-field">
@@ -682,183 +967,232 @@ function renderReturn() {
             <label>Notes</label>
             <textarea id="returnNotes"></textarea>
           </div>
+
         </div>
 
         <div class="form-actions">
-          <button class="action-button">Save Return</button>
+          <button class="action-button">
+            Save Return
+          </button>
         </div>
+
       </form>
     </div>
 
-    <div class="panel">
-      <h2>Returned Material Inspection</h2>
-      <p>Admin must classify returned material before it can be transferred to Fresh Stock.</p>
+    ${
+      isAdmin()
+        ? `
+          <div class="panel">
+            <h2>Returned Material Classification</h2>
 
-      ${state.role === "ADMIN"
-        ? returnedRows.length
-          ? table(
-              ["Return ID", "Material", "Employee", "Quantity", "Condition", "Action"],
-              returnedRows.map(t => [
-                t.TxnID,
-                t.ItemName,
-                t.PersonName,
-                number(t.Quantity),
-                t.ReturnCondition || "Not Classified",
-                t.ReturnCondition
-                  ? "-"
-                  : `<button class="secondary-button"
-                      onclick="classifyReturnPrompt('${escapeAttribute(t.TxnID)}','REUSABLE')">
-                      Reusable
-                    </button>
-                    <button class="secondary-button"
-                      onclick="classifyReturnPrompt('${escapeAttribute(t.TxnID)}','DAMAGED')">
-                      Damaged
-                    </button>`
-              ])
-            )
-          : '<div class="empty-state">No returned material.</div>'
-        : '<div class="empty-state">Admin access required for inspection.</div>'}
-    </div>
+            ${
+              unclassified.length
+                ? table(
+                    [
+                      "Return ID",
+                      "Material",
+                      "Quantity",
+                      "Date",
+                      "Classification"
+                    ],
+                    unclassified.map(t => [
+                      t.TxnID,
+                      t.ItemName,
+                      number(t.Quantity),
+                      formatDate(t.Timestamp),
+                      `
+                        <select
+                          class="return-category"
+                          data-txn-id="${escapeAttribute(t.TxnID)}"
+                        >
+                          <option value="">Select</option>
+                          <option value="REUSABLE">REUSABLE</option>
+                          <option value="DAMAGED">DAMAGED</option>
+                        </select>
+                        <button
+                          type="button"
+                          class="secondary-button classify-button"
+                          data-txn-id="${escapeAttribute(t.TxnID)}"
+                        >
+                          Save
+                        </button>
+                      `
+                    ])
+                  )
+                : '<div class="empty-state">All returns are classified.</div>'
+            }
 
-    ${state.role === "ADMIN" ? renderReusableTransferPanel() : ""}
+          </div>
+
+          <div class="panel">
+            <h2>Transfer Reusable Stock</h2>
+
+            <p>
+              Only Admin can transfer classified reusable material
+              into Fresh Stock.
+            </p>
+
+            <form id="reusableTransferForm">
+
+              <div class="form-grid">
+
+                <div class="form-field">
+                  <label>Material</label>
+                  <select id="reusableItem" required>
+                    ${itemOptions()}
+                  </select>
+                </div>
+
+                <div class="form-field">
+                  <label>Transfer Quantity</label>
+                  <input
+                    type="number"
+                    id="reusableQuantity"
+                    min="0.0001"
+                    step="any"
+                    required
+                  >
+                </div>
+
+              </div>
+
+              <button class="action-button">
+                Transfer to Fresh Stock
+              </button>
+
+            </form>
+          </div>
+        `
+        : ""
+    }
+
   `;
 
-  $("returnForm").addEventListener("submit", async event => {
-    event.preventDefault();
+  $("returnForm").addEventListener("submit", submitReturn);
 
-    const issueTxnId = $("returnIssue").value;
-    const quantity = Number($("returnQuantity").value);
-    const pendingQty = getOutstanding(issueTxnId);
-
-    if (!issueTxnId || quantity <= 0 || quantity > pendingQty) {
-      showToast("Return quantity exceeds pending quantity or is invalid.");
-      return;
-    }
-
-    if (!confirm("Confirm this material return?")) return;
-
-    try {
-      await api("return", {
-        issueTxnId,
-        quantity,
-        reference: $("returnReference").value,
-        notes: $("returnNotes").value
-      });
-
-      showToast("Return saved. Fresh Stock has not increased.");
-      await navigate("return");
-
-    } catch (error) {
-      showToast(error.message);
-    }
+  document.querySelectorAll("[data-return-id]").forEach(button => {
+    button.addEventListener("click", () => {
+      $("returnIssue").value = button.dataset.returnId;
+      $("returnQuantity").focus();
+    });
   });
-}
 
-window.selectReturn = function(txnId) {
-  $("returnIssue").value = txnId;
-  $("returnQuantity").focus();
-};
-
-window.classifyReturnPrompt = async function(txnId, condition) {
-  const label = condition === "REUSABLE" ? "Reusable" : "Damaged";
-
-  if (!confirm(`Classify this returned material as ${label}?`)) return;
-
-  try {
-    await api("classifyReturn", {
-      returnTxnId: txnId,
-      condition
+  if (isAdmin()) {
+    document.querySelectorAll(".classify-button").forEach(button => {
+      button.addEventListener("click", () => {
+        classifyReturn(button.dataset.txnId);
+      });
     });
 
-    showToast("Return classified as " + label + ".");
+    $("reusableTransferForm").addEventListener(
+      "submit",
+      transferReusableStock
+    );
+  }
+}
+
+async function submitReturn(event) {
+  event.preventDefault();
+
+  const issueTxnId = $("returnIssue").value;
+  const quantity = Number($("returnQuantity").value);
+
+  const pendingQty = getOutstanding(issueTxnId);
+
+  if (!issueTxnId || !Number.isFinite(quantity) || quantity <= 0) {
+    showToast("Original issue aur valid quantity select karein.");
+    return;
+  }
+
+  if (quantity > pendingQty) {
+    showToast("Return quantity pending quantity se zyada hai.");
+    return;
+  }
+
+  if (!confirm("Confirm this material return?")) return;
+
+  try {
+    await api("return", {
+      issueTxnId,
+      quantity,
+      reference: $("returnReference").value,
+      notes: $("returnNotes").value
+    });
+
+    showToast(
+      "Return saved. Fresh Stock mein material automatically add nahi hua."
+    );
+
     await navigate("return");
 
   } catch (error) {
     showToast(error.message);
   }
-};
-
-function renderReusableTransferPanel() {
-  const items = state.items.filter(item =>
-    Number(item.ReusablePending || 0) > 0
-  );
-
-  return `
-    <div class="panel">
-      <h2>Admin - Transfer Reusable Material to Fresh Stock</h2>
-
-      <form id="reusableTransferForm">
-        <div class="form-grid">
-          <div class="form-field">
-            <label>Material</label>
-            <select id="transferItem" required>
-              <option value="">Select material</option>
-              ${items.map(i => `
-                <option value="${escapeAttribute(i.ItemCode)}">
-                  ${escapeHTML(i.ItemName)} - Reusable:
-                  ${number(i.ReusablePending)}
-                </option>
-              `).join("")}
-            </select>
-          </div>
-
-          <div class="form-field">
-            <label>Transfer Quantity</label>
-            <input type="number" id="transferQuantity"
-              min="0.0001" step="any" required>
-          </div>
-
-          <div class="form-field">
-            <label>Reference</label>
-            <input id="transferReference">
-          </div>
-
-          <div class="form-field">
-            <label>Notes</label>
-            <input id="transferNotes">
-          </div>
-        </div>
-
-        <button class="action-button">Transfer to Fresh Stock</button>
-      </form>
-    </div>
-  `;
 }
 
-/* =========================================================
-   REUSABLE TRANSFER FORM HANDLER
-   ========================================================= */
+async function classifyReturn(txnId) {
+  const select = document.querySelector(
+    `.return-category[data-txn-id="${CSS.escape(txnId)}"]`
+  );
 
-document.addEventListener("submit", async event => {
-  if (event.target.id !== "reusableTransferForm") return;
+  const category = select ? select.value : "";
 
-  event.preventDefault();
-
-  const itemCode = $("transferItem").value;
-  const quantity = Number($("transferQuantity").value);
-
-  if (!itemCode || quantity <= 0) {
-    showToast("Select material and valid quantity.");
+  if (!["REUSABLE", "DAMAGED"].includes(category)) {
+    showToast("REUSABLE ya DAMAGED select karein.");
     return;
   }
 
-  if (!confirm("Transfer approved reusable material to Fresh Stock?")) return;
+  if (!confirm("Save return classification as " + category + "?")) {
+    return;
+  }
+
+  try {
+    await api("classifyReturn", {
+      txnId,
+      category
+    });
+
+    showToast("Return classification saved.");
+
+    await navigate("return");
+
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function transferReusableStock(event) {
+  event.preventDefault();
+
+  const itemCode = $("reusableItem").value;
+  const quantity = Number($("reusableQuantity").value);
+
+  if (!itemCode || !Number.isFinite(quantity) || quantity <= 0) {
+    showToast("Valid material aur quantity select karein.");
+    return;
+  }
+
+  if (!confirm(
+    "Transfer reusable material to Fresh Stock?"
+  )) {
+    return;
+  }
 
   try {
     await api("transferReusable", {
       itemCode,
-      quantity,
-      reference: $("transferReference").value,
-      notes: $("transferNotes").value
+      quantity
     });
 
     showToast("Reusable material transferred to Fresh Stock.");
+
     await navigate("return");
 
   } catch (error) {
     showToast(error.message);
   }
-});
+}
+
 
 /* =========================================================
    LIVE STOCK
@@ -867,12 +1201,19 @@ document.addEventListener("submit", async event => {
 function renderStock() {
   $("pageContent").innerHTML = `
     <div class="panel">
+
       <h2>Live Material Stock</h2>
 
-      <input class="search-input" id="stockSearch"
-        placeholder="Search item code or name">
+      <input
+        class="search-input"
+        id="stockSearch"
+        placeholder="Search item code or name"
+      >
 
-      <div id="stockTable">${stockTable(state.items)}</div>
+      <div id="stockTable">
+        ${stockTable(state.items)}
+      </div>
+
     </div>
   `;
 
@@ -880,8 +1221,13 @@ function renderStock() {
     const q = event.target.value.toLowerCase();
 
     const filtered = state.items.filter(item =>
-      [item.ItemCode, item.ItemName]
-        .some(v => String(v || "").toLowerCase().includes(q))
+      [
+        item.ItemCode,
+        item.ItemName,
+        item.Unit
+      ].some(value =>
+        String(value || "").toLowerCase().includes(q)
+      )
     );
 
     $("stockTable").innerHTML = stockTable(filtered);
@@ -891,12 +1237,16 @@ function renderStock() {
 function stockTable(items) {
   return table(
     [
-      "Item Code", "Material", "Unit", "Fresh Stock",
-      "Pending Issue", "Returned/Used", "Reusable Pending",
-      "Damaged", "Minimum", "Status"
+      "Item Code",
+      "Material",
+      "Unit",
+      "Fresh Stock",
+      "Issued",
+      "Minimum",
+      "Status"
     ],
     items.map(item => {
-      const available = Number(item.FreshStock ?? item.AvailableStock ?? 0);
+      const available = Number(item.AvailableStock || 0);
       const minimum = Number(item.MinStock || 0);
 
       return [
@@ -904,10 +1254,7 @@ function stockTable(items) {
         item.ItemName,
         item.Unit,
         number(available),
-        number(item.PendingIssue ?? item.IssuedStock),
-        number(item.ReturnedStock),
-        number(item.ReusablePending),
-        number(item.DamagedStock),
+        number(item.IssuedStock),
         number(minimum),
         available <= minimum
           ? '<span class="badge badge-warning">Low Stock</span>'
@@ -917,6 +1264,7 @@ function stockTable(items) {
   );
 }
 
+
 /* =========================================================
    TRANSACTION HISTORY
    ========================================================= */
@@ -924,14 +1272,19 @@ function stockTable(items) {
 function renderHistory() {
   $("pageContent").innerHTML = `
     <div class="panel">
+
       <h2>Transaction History</h2>
 
-      <input class="search-input" id="historySearch"
-        placeholder="Search employee, item, code or transaction">
+      <input
+        class="search-input"
+        id="historySearch"
+        placeholder="Search employee, item, code or transaction"
+      >
 
       <div id="historyTable">
         ${transactionTable(state.transactions)}
       </div>
+
     </div>
   `;
 
@@ -940,42 +1293,57 @@ function renderHistory() {
 
     const filtered = state.transactions.filter(t =>
       [
-        t.TxnID, t.Type, t.ItemCode, t.ItemName,
-        t.EmployeeCode, t.PersonName, t.Department,
-        t.ReturnCondition
-      ].some(v => String(v || "").toLowerCase().includes(q))
+        t.TxnID,
+        t.Type,
+        t.ItemCode,
+        t.ItemName,
+        t.EmployeeCode,
+        t.PersonName,
+        t.Department,
+        t.Notes
+      ].some(value =>
+        String(value || "").toLowerCase().includes(q)
+      )
     );
 
-    $("historyTable").innerHTML = transactionTable(filtered);
+    $("historyTable").innerHTML =
+      transactionTable(filtered);
   });
 }
 
 function transactionTable(rows) {
   return table(
     [
-      "Date", "Type", "Item", "Quantity",
-      "Employee", "Employee Code", "Condition", "Entered By", "Notes"
+      "Date",
+      "Type",
+      "Item",
+      "Quantity",
+      "Employee",
+      "Employee Code",
+      "Entered By",
+      "Notes"
     ],
     rows.map(t => [
       formatDate(t.Timestamp),
       t.Type,
-      `${escapeHTML(t.ItemName)} (${escapeHTML(t.ItemCode)})`,
+      String(t.ItemName || "") +
+        " (" + String(t.ItemCode || "") + ")",
       number(t.Quantity),
-      escapeHTML(t.PersonName || "-"),
-      escapeHTML(t.EmployeeCode || "-"),
-      escapeHTML(t.ReturnCondition || "-"),
-      escapeHTML(t.EnteredBy || "-"),
-      escapeHTML(t.Notes || "-")
+      t.PersonName || "-",
+      t.EmployeeCode || "-",
+      t.EnteredBy || "-",
+      t.Notes || "-"
     ])
   );
 }
+
 
 /* =========================================================
    PEOPLE MANAGEMENT
    ========================================================= */
 
 function renderPeople() {
-  if (state.role !== "ADMIN") {
+  if (!isAdmin()) {
     $("pageContent").innerHTML =
       '<div class="empty-state">Admin access required.</div>';
     return;
@@ -983,10 +1351,13 @@ function renderPeople() {
 
   $("pageContent").innerHTML = `
     <div class="panel">
+
       <h2>Add Employee</h2>
 
       <form id="personForm">
+
         <div class="form-grid">
+
           <div class="form-field">
             <label>Employee Code</label>
             <input id="personCode" required>
@@ -1001,18 +1372,33 @@ function renderPeople() {
             <label>Department</label>
             <input id="personDepartment">
           </div>
+
         </div>
 
-        <button class="action-button">Save Employee</button>
+        <div class="form-actions">
+          <button class="action-button">
+            Save Employee
+          </button>
+        </div>
+
       </form>
+
     </div>
 
     <div class="panel">
-      <h2>Employee List</h2>
-      <input class="search-input" id="peopleSearch"
-        placeholder="Search employee name or code">
 
-      <div id="peopleTable">${peopleTable(state.people)}</div>
+      <h2>Employee List</h2>
+
+      <input
+        class="search-input"
+        id="peopleSearch"
+        placeholder="Search employee"
+      >
+
+      <div id="peopleTable">
+        ${peopleTable(state.people)}
+      </div>
+
     </div>
   `;
 
@@ -1021,12 +1407,13 @@ function renderPeople() {
 
     try {
       await api("savePerson", {
-        employeeCode: $("personCode").value,
-        personName: $("personName").value,
-        department: $("personDepartment").value
+        employeeCode: $("personCode").value.trim(),
+        personName: $("personName").value.trim(),
+        department: $("personDepartment").value.trim()
       });
 
       showToast("Employee saved.");
+
       await navigate("people");
 
     } catch (error) {
@@ -1039,8 +1426,14 @@ function renderPeople() {
 
     $("peopleTable").innerHTML = peopleTable(
       state.people.filter(p =>
-        [p.PersonID, p.EmployeeCode, p.PersonName, p.Department]
-          .some(v => String(v || "").toLowerCase().includes(q))
+        [
+          p.EmployeeCode,
+          p.PersonName,
+          p.Department,
+          p.PersonID
+        ].some(value =>
+          String(value || "").toLowerCase().includes(q)
+        )
       )
     );
   });
@@ -1048,22 +1441,28 @@ function renderPeople() {
 
 function peopleTable(rows) {
   return table(
-    ["Person ID", "Employee Code", "Name", "Department"],
+    [
+      "Person ID",
+      "Employee Code",
+      "Name",
+      "Department"
+    ],
     rows.map(p => [
-      escapeHTML(p.PersonID || "-"),
-      escapeHTML(p.EmployeeCode),
-      escapeHTML(p.PersonName),
-      escapeHTML(p.Department || "-")
+      p.PersonID || "-",
+      p.EmployeeCode,
+      p.PersonName,
+      p.Department || "-"
     ])
   );
 }
+
 
 /* =========================================================
    ITEM MANAGEMENT
    ========================================================= */
 
 function renderItems() {
-  if (state.role !== "ADMIN") {
+  if (!isAdmin()) {
     $("pageContent").innerHTML =
       '<div class="empty-state">Admin access required.</div>';
     return;
@@ -1071,10 +1470,13 @@ function renderItems() {
 
   $("pageContent").innerHTML = `
     <div class="panel">
+
       <h2>Add Material</h2>
 
       <form id="itemForm">
+
         <div class="form-grid">
+
           <div class="form-field">
             <label>Item Code</label>
             <input id="itemCode" required>
@@ -1092,27 +1494,54 @@ function renderItems() {
 
           <div class="form-field">
             <label>Opening Stock</label>
-            <input type="number" id="openingStock"
-              min="0" step="any" value="0" required>
+            <input
+              type="number"
+              id="openingStock"
+              min="0"
+              step="any"
+              value="0"
+              required
+            >
           </div>
 
           <div class="form-field">
             <label>Minimum Stock</label>
-            <input type="number" id="minStock"
-              min="0" step="any" value="0" required>
+            <input
+              type="number"
+              id="minStock"
+              min="0"
+              step="any"
+              value="0"
+              required
+            >
           </div>
+
         </div>
 
-        <button class="action-button">Save Material</button>
+        <div class="form-actions">
+          <button class="action-button">
+            Save Material
+          </button>
+        </div>
+
       </form>
+
     </div>
 
     <div class="panel">
-      <h2>Material List</h2>
-      <input class="search-input" id="itemSearch"
-        placeholder="Search material code or name">
 
-      <div id="itemsTable">${stockTable(state.items)}</div>
+      <h2>Material List</h2>
+
+      <input
+        class="search-input"
+        id="itemSearch"
+        placeholder="Search material"
+      >
+
+      <div id="itemsTable">
+        ${stockTable(state.items)}
+      </div>
+
     </div>
   `;
 
@@ -1121,14 +1550,15 @@ function renderItems() {
 
     try {
       await api("saveItem", {
-        itemCode: $("itemCode").value,
-        itemName: $("itemName").value,
-        unit: $("itemUnit").value,
+        itemCode: $("itemCode").value.trim(),
+        itemName: $("itemName").value.trim(),
+        unit: $("itemUnit").value.trim(),
         openingStock: Number($("openingStock").value),
         minStock: Number($("minStock").value)
       });
 
       showToast("Material saved.");
+
       await navigate("items");
 
     } catch (error) {
@@ -1141,12 +1571,17 @@ function renderItems() {
 
     $("itemsTable").innerHTML = stockTable(
       state.items.filter(item =>
-        [item.ItemCode, item.ItemName]
-          .some(v => String(v || "").toLowerCase().includes(q))
+        [
+          item.ItemCode,
+          item.ItemName
+        ].some(value =>
+          String(value || "").toLowerCase().includes(q)
+        )
       )
     );
   });
 }
+
 
 /* =========================================================
    REPORTS
@@ -1155,10 +1590,13 @@ function renderItems() {
 function renderReports() {
   $("pageContent").innerHTML = `
     <div class="panel">
+
       <h2>Transaction Reports</h2>
 
       <form id="reportForm">
+
         <div class="form-grid">
+
           <div class="form-field">
             <label>From Date</label>
             <input type="date" id="reportFrom">
@@ -1171,6 +1609,7 @@ function renderReports() {
 
           <div class="form-field">
             <label>Transaction Type</label>
+
             <select id="reportType">
               <option value="">All</option>
               <option value="ISSUE">Issue</option>
@@ -1182,40 +1621,64 @@ function renderReports() {
 
           <div class="form-field">
             <label>Employee</label>
+
             <select id="reportEmployee">
               <option value="">All Employees</option>
+
               ${state.people.map(p => `
                 <option value="${escapeAttribute(p.EmployeeCode)}">
-                  ${escapeHTML(p.PersonName)} (${escapeHTML(p.EmployeeCode)})
+                  ${escapeHTML(p.PersonName)}
+                  (${escapeHTML(p.EmployeeCode)})
                 </option>
               `).join("")}
+
             </select>
           </div>
 
           <div class="form-field">
             <label>Material</label>
+
             <select id="reportItem">
-              <option value="">All Materials</option>
-              ${state.items.map(i => `
-                <option value="${escapeAttribute(i.ItemCode)}">
-                  ${escapeHTML(i.ItemName)} (${escapeHTML(i.ItemCode)})
-                </option>
-              `).join("")}
+              ${itemOptions()}
             </select>
           </div>
+
         </div>
 
-        <button class="action-button">Generate Report</button>
+        <div class="form-actions">
+          <button class="action-button">
+            Generate Report
+          </button>
+        </div>
+
       </form>
+
     </div>
 
     <div class="panel">
+
       <div class="form-actions">
-        <button class="secondary-button" id="exportReport">Export CSV</button>
-        <button class="secondary-button" id="printReport">Print</button>
+
+        <button
+          class="secondary-button"
+          id="exportReport"
+          type="button"
+        >
+          Export CSV
+        </button>
+
+        <button
+          class="secondary-button"
+          id="printReport"
+          type="button"
+        >
+          Print
+        </button>
+
       </div>
 
       <div id="reportTable"></div>
+
     </div>
   `;
 
@@ -1232,19 +1695,24 @@ function renderReports() {
       });
 
       state.reportRows = result.transactions || [];
-      $("reportTable").innerHTML = transactionTable(state.reportRows);
+
+      $("reportTable").innerHTML =
+        transactionTable(state.reportRows);
 
     } catch (error) {
       showToast(error.message);
     }
   });
 
-  $("exportReport").addEventListener("click", () =>
-    downloadCSV(state.reportRows)
-  );
+  $("exportReport").addEventListener("click", () => {
+    downloadCSV(state.reportRows || []);
+  });
 
-  $("printReport").addEventListener("click", () => window.print());
+  $("printReport").addEventListener("click", () => {
+    window.print();
+  });
 }
+
 
 /* =========================================================
    VOICE AGENT
@@ -1253,31 +1721,50 @@ function renderReports() {
 function renderVoice() {
   $("pageContent").innerHTML = `
     <div class="voice-panel">
+
       <h2>Hindi Voice Agent</h2>
 
-      <p>उदाहरण:</p>
-      <ul>
-        <li>"Rahul ko 2 Pen issue karo"</li>
-        <li>"Rahul ka pending issue batao"</li>
-        <li>"Pen ka fresh stock kitna hai"</li>
-        <li>"Rahul ko 1 Pen return karo"</li>
-      </ul>
+      <p>
+        उदाहरण: Rahul ko 2 Pen issue karo
+      </p>
 
-      <button id="voiceButton" class="voice-button">🎙</button>
+      <button
+        type="button"
+        id="voiceButton"
+        class="voice-button"
+      >
+        🎙
+      </button>
 
-      <p id="voiceStatus">बोलने के लिए माइक्रोफोन दबाएँ।</p>
+      <p id="voiceStatus">
+        बोलने के लिए माइक्रोफोन दबाएँ।
+      </p>
 
       <div class="form-field">
+
         <label>या अपना आदेश लिखें</label>
-        <textarea id="voiceText"
-          placeholder="Rahul ko 2 Pen issue karo"></textarea>
+
+        <textarea
+          id="voiceText"
+          placeholder="Rahul ko 2 Pen issue karo"
+        ></textarea>
+
       </div>
 
       <div class="form-actions">
-        <button class="action-button" id="voiceParse">आदेश समझें</button>
+
+        <button
+          type="button"
+          class="action-button"
+          id="voiceParse"
+        >
+          आदेश समझें
+        </button>
+
       </div>
 
       <div id="voiceResult"></div>
+
     </div>
   `;
 
@@ -1285,43 +1772,40 @@ function renderVoice() {
   $("voiceParse").addEventListener("click", parseVoice);
 }
 
-function speak(text) {
-  if (!("speechSynthesis" in window)) return;
-
-  window.speechSynthesis.cancel();
-
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = "hi-IN";
-  utterance.rate = 0.95;
-
-  window.speechSynthesis.speak(utterance);
-}
-
 function startVoice() {
   const Recognition =
-    window.SpeechRecognition || window.webkitSpeechRecognition;
+    window.SpeechRecognition ||
+    window.webkitSpeechRecognition;
 
   if (!Recognition) {
-    showToast("Voice recognition is not supported. Please type the command.");
+    showToast(
+      "Voice recognition supported nahi hai. Command type karein."
+    );
     return;
   }
 
   const recognition = new Recognition();
 
   recognition.lang = "hi-IN";
+  recognition.continuous = false;
   recognition.interimResults = false;
   recognition.maxAlternatives = 1;
 
   $("voiceStatus").textContent = "सुन रहा हूँ...";
+  $("voiceResult").textContent = "";
 
   recognition.onresult = event => {
-    $("voiceText").value = event.results[0][0].transcript;
+    $("voiceText").value =
+      event.results[0][0].transcript;
+
     $("voiceStatus").textContent = "आदेश मिल गया।";
+
     parseVoice();
   };
 
   recognition.onerror = event => {
-    $("voiceStatus").textContent = "Microphone error: " + event.error;
+    $("voiceStatus").textContent =
+      "Microphone error: " + event.error;
   };
 
   recognition.onend = () => {
@@ -1331,189 +1815,191 @@ function startVoice() {
   try {
     recognition.start();
     $("voiceButton").classList.add("listening");
+
   } catch (error) {
-    showToast("Microphone could not start: " + error.message);
+    $("voiceStatus").textContent =
+      "Microphone start nahi hua. Dobara try karein.";
   }
 }
 
-function parseVoice() {
-  const command = $("voiceText").value.trim();
+function parseHindiNumber(text) {
+  const digit = String(text).match(/\d+(?:\.\d+)?/);
 
-  if (!command) {
+  if (digit) return Number(digit[0]);
+
+  const words = {
+    "एक": 1,
+    "दो": 2,
+    "तीन": 3,
+    "चार": 4,
+    "पांच": 5,
+    "पाँच": 5,
+    "छह": 6,
+    "छः": 6,
+    "सात": 7,
+    "आठ": 8,
+    "नौ": 9,
+    "दस": 10,
+    "ग्यारह": 11,
+    "बारह": 12,
+    "तेरह": 13,
+    "चौदह": 14,
+    "पंद्रह": 15,
+    "पन्द्रह": 15,
+    "सोलह": 16,
+    "सत्रह": 17,
+    "अठारह": 18,
+    "उन्नीस": 19,
+    "बीस": 20
+  };
+
+  const parts = String(text).split(/\s+/);
+
+  for (const part of parts) {
+    if (Object.prototype.hasOwnProperty.call(words, part)) {
+      return words[part];
+    }
+  }
+
+  return 0;
+}
+
+function parseVoice() {
+  const text = $("voiceText").value.trim();
+
+  if (!text) {
     showToast("पहले अपना आदेश बोलें या लिखें।");
     return;
   }
 
-  const normalized = command.toLowerCase();
+  const normalized = text.toLowerCase();
 
-  const person = state.people.find(p =>
-    normalized.includes(String(p.PersonName).toLowerCase()) ||
-    normalized.includes(String(p.EmployeeCode).toLowerCase())
-  );
+  const quantity = parseHindiNumber(normalized);
 
-  const item = state.items.find(i =>
-    normalized.includes(String(i.ItemName).toLowerCase()) ||
-    normalized.includes(String(i.ItemCode).toLowerCase())
-  );
+  if (!(quantity > 0)) {
+    showToast("Quantity samajh nahi aayi. Number dobara boliye.");
+    return;
+  }
 
-  const isPendingQuestion =
-    /pending|बाकी|कितना बाकी|लंबित/.test(normalized);
+  const personMatches = state.people.filter(p => {
+    const name = String(p.PersonName || "").toLowerCase();
+    const code = String(p.EmployeeCode || "").toLowerCase();
 
-  const isStockQuestion =
-    /stock|स्टॉक|उपलब्ध|कितना है/.test(normalized);
+    return (
+      (name.length > 1 && normalized.includes(name)) ||
+      (code.length > 1 && normalized.includes(code))
+    );
+  });
+
+  const itemMatches = state.items.filter(item => {
+    const name = String(item.ItemName || "").toLowerCase();
+    const code = String(item.ItemCode || "").toLowerCase();
+
+    return (
+      (name.length > 1 && normalized.includes(name)) ||
+      (code.length > 1 && normalized.includes(code))
+    );
+  });
+
+  if (personMatches.length !== 1) {
+    $("voiceResult").textContent =
+      personMatches.length > 1
+        ? "एक से ज्यादा Employee मिले। कृपया Employee Code बोलें।"
+        : "Employee नहीं मिला। सही नाम या Employee Code बोलें।";
+
+    return;
+  }
+
+  if (itemMatches.length !== 1) {
+    $("voiceResult").textContent =
+      itemMatches.length > 1
+        ? "एक से ज्यादा Material मिले। कृपया Item Code बोलें।"
+        : "Material नहीं मिला। सही Material Name या Code बोलें।";
+
+    return;
+  }
+
+  const person = personMatches[0];
+  const item = itemMatches[0];
 
   const isReturn =
-    /return|वापस|लौटा/.test(normalized);
+    /return|वापस|लौटा|जमा करो|जमा कर/.test(normalized);
 
   const isIssue =
-    /issue|दे दो|जारी|निकाल|भेज/.test(normalized);
-
-  if (isPendingQuestion && person && item) {
-    const pending = employeeItemOutstanding(person.EmployeeCode, item.ItemCode);
-
-    const answer =
-      `${person.PersonName} के पास ${item.ItemName} का pending issue ${pending} है।`;
-
-    $("voiceResult").textContent = answer;
-    speak(answer);
-    return;
-  }
-
-  if (isStockQuestion && item) {
-    const answer =
-      `${item.ItemName} का Fresh Stock ${number(item.AvailableStock)} है।`;
-
-    $("voiceResult").textContent = answer;
-    speak(answer);
-    return;
-  }
-
-  if (!person || !item) {
-    const message = "कर्मचारी या सामग्री नहीं मिली। कृपया सही नाम या कोड बोलें।";
-    $("voiceResult").textContent = message;
-    speak(message);
-    return;
-  }
-
-  const quantityMatch = normalized.match(/\b\d+(?:\.\d+)?\b/);
-
-  if (!quantityMatch) {
-    showToast("Quantity समझ नहीं आई।");
-    return;
-  }
-
-  const quantity = Number(quantityMatch[0]);
-
-  if (quantity <= 0) {
-    showToast("Quantity शून्य से अधिक होनी चाहिए।");
-    return;
-  }
-
-  if (!isIssue && !isReturn) {
-    showToast("Issue या Return का आदेश स्पष्ट नहीं है।");
-    return;
-  }
+    /issue|दे दो|जारी|निकाल|भेज|इश्यू/.test(normalized);
 
   if (isReturn) {
-    const matchingIssues = getPendingIssues().filter(t =>
-      String(t.EmployeeCode) === String(person.EmployeeCode) &&
-      String(t.ItemCode) === String(item.ItemCode)
-    );
+    $("voiceResult").textContent =
+      "Return command पहचाना गया। Material Return पेज पर जाकर Original Issue चुनें।";
+    return;
+  }
 
-    if (!matchingIssues.length) {
-      showToast("इस कर्मचारी के पास इस सामग्री का Pending Issue नहीं है।");
-      return;
-    }
-
-    const options = matchingIssues.map(t => `
-      <option value="${escapeAttribute(t.TxnID)}">
-        ${escapeHTML(t.TxnID)} - Pending ${number(getOutstanding(t.TxnID))}
-      </option>
-    `).join("");
-
-    $("voiceResult").innerHTML = `
-      <div class="panel">
-        <h2>Return की पुष्टि करें</h2>
-        <p>कर्मचारी: ${escapeHTML(person.PersonName)}</p>
-        <p>Material: ${escapeHTML(item.ItemName)}</p>
-        <label>Original Issue</label>
-        <select id="voiceReturnIssue">${options}</select>
-        <label>Quantity</label>
-        <input type="number" id="voiceReturnQty"
-          min="0.0001" step="any" value="${quantity}">
-        <button class="action-button" id="confirmVoiceReturn">
-          Confirm Return
-        </button>
-      </div>
-    `;
-
-    $("confirmVoiceReturn").addEventListener("click", async () => {
-      const issueTxnId = $("voiceReturnIssue").value;
-      const qty = Number($("voiceReturnQty").value);
-
-      if (qty <= 0 || qty > getOutstanding(issueTxnId)) {
-        showToast("Return quantity गलत है।");
-        return;
-      }
-
-      if (!confirm("क्या आप यह Return सेव करना चाहते हैं?")) return;
-
-      try {
-        await api("return", {
-          issueTxnId,
-          quantity: qty,
-          notes: "Voice Agent entry"
-        });
-
-        showToast("Voice Return saved.");
-        speak("Material Return सेव हो गया है।");
-        await navigate("voice");
-
-      } catch (error) {
-        showToast(error.message);
-      }
-    });
-
+  if (!isIssue) {
+    showToast("Issue command स्पष्ट नहीं है।");
     return;
   }
 
   const outstanding = employeeItemOutstanding(
-    person.EmployeeCode,
+    person,
     item.ItemCode
   );
 
-  if (outstanding > 0 && state.role !== "ADMIN") {
-    showToast("इस कर्मचारी के पास यह सामग्री पहले से Pending है।");
+  if (outstanding > 0 && !isAdmin()) {
+    $("voiceResult").textContent =
+      "इस Employee के पास यह Material पहले से Pending है।";
     return;
   }
 
   if (quantity > Number(item.AvailableStock || 0)) {
-    showToast("पर्याप्त Fresh Stock उपलब्ध नहीं है।");
+    showToast("पर्याप्त Stock उपलब्ध नहीं है।");
     return;
   }
 
   $("voiceResult").innerHTML = `
     <div class="panel">
-      <h2>Issue आदेश की पुष्टि करें</h2>
-      <p>कर्मचारी: <strong>${escapeHTML(person.PersonName)}</strong></p>
-      <p>Employee Code: <strong>${escapeHTML(person.EmployeeCode)}</strong></p>
-      <p>Material: <strong>${escapeHTML(item.ItemName)}</strong></p>
-      <p>Quantity: <strong>${number(quantity)}</strong></p>
 
-      ${outstanding > 0 && state.role === "ADMIN" ? `
-        <div class="form-field">
-          <label>Admin Override Password</label>
-          <input type="password" id="voiceOverridePassword">
-        </div>
-        <div class="form-field">
-          <label>Override Reason</label>
-          <textarea id="voiceOverrideReason"></textarea>
-        </div>
-      ` : ""}
+      <h2>आदेश की पुष्टि करें</h2>
 
-      <button class="action-button" id="confirmVoiceIssue">
+      <p>
+        कर्मचारी:
+        <strong>${escapeHTML(person.PersonName)}</strong>
+      </p>
+
+      <p>
+        Employee Code:
+        <strong>${escapeHTML(person.EmployeeCode)}</strong>
+      </p>
+
+      <p>
+        Material:
+        <strong>${escapeHTML(item.ItemName)}</strong>
+      </p>
+
+      <p>
+        Quantity:
+        <strong>${number(quantity)}</strong>
+      </p>
+
+      ${
+        outstanding > 0 && isAdmin()
+          ? `
+            <p>Admin Override Password</p>
+            <input type="password" id="voiceOverridePassword">
+
+            <p>Override Reason</p>
+            <textarea id="voiceOverrideReason"></textarea>
+          `
+          : ""
+      }
+
+      <button
+        type="button"
+        class="action-button"
+        id="confirmVoiceIssue"
+      >
         Confirm and Issue
       </button>
+
     </div>
   `;
 
@@ -1524,177 +2010,50 @@ function parseVoice() {
       await api("issue", {
         itemCode: item.ItemCode,
         employeeCode: person.EmployeeCode,
+        personId: person.PersonID,
         quantity,
         notes: "Voice Agent entry",
-        overridePassword: $("voiceOverridePassword")
-          ? $("voiceOverridePassword").value : "",
-        overrideReason: $("voiceOverrideReason")
-          ? $("voiceOverrideReason").value : ""
+        overridePassword:
+          $("voiceOverridePassword")?.value || "",
+        overrideReason:
+          $("voiceOverrideReason")?.value || ""
       });
 
-      showToast("Voice Issue saved.");
-      speak("Material Issue सफलतापूर्वक सेव हो गया है।");
-      await navigate("voice");
+      showToast("Voice order issued successfully.");
+
+      $("voiceText").value = "";
+      $("voiceResult").textContent = "";
+
+      await refreshData();
 
     } catch (error) {
       showToast(error.message);
-      speak(error.message);
     }
   });
 }
 
-/* =========================================================
-   QR / BARCODE SCANNER
-   ========================================================= */
-
-function scannerPanel(target) {
-  return `
-    <div class="panel scanner-panel">
-      <h2>QR / Barcode Scanner</h2>
-      <p>Material का QR Code या Barcode कैमरे से Scan करें।</p>
-
-      <button class="secondary-button" id="startScanner">
-        Start Scanner
-      </button>
-
-      <button class="secondary-button" id="stopScanner" hidden>
-        Stop Scanner
-      </button>
-
-      <video id="scannerVideo" autoplay playsinline
-        style="width:100%;max-width:450px;display:none"></video>
-
-      <p id="scannerStatus"></p>
-    </div>
-  `;
-}
-
-function setupScanner(target) {
-  if (!$("startScanner")) return;
-
-  $("startScanner").addEventListener("click", () => startScanner(target));
-  $("stopScanner").addEventListener("click", stopScanner);
-}
-
-async function startScanner(target) {
-  if (!("BarcodeDetector" in window)) {
-    showToast("इस browser में Barcode scanning उपलब्ध नहीं है।");
-    return;
-  }
-
-  try {
-    const formats = await BarcodeDetector.getSupportedFormats();
-
-    const supported = formats.filter(f =>
-      ["qr_code", "code_128", "code_39", "ean_13", "ean_8", "upc_a", "upc_e"].includes(f)
-    );
-
-    const detector = new BarcodeDetector({ formats: supported });
-
-    state.scannerStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment" }
-    });
-
-    state.scannerActive = true;
-
-    const video = $("scannerVideo");
-    video.srcObject = state.scannerStream;
-    video.style.display = "block";
-
-    $("startScanner").hidden = true;
-    $("stopScanner").hidden = false;
-    $("scannerStatus").textContent = "Scanning...";
-
-    await video.play();
-
-    async function scanFrame() {
-      if (!state.scannerActive) return;
-
-      try {
-        const results = await detector.detect(video);
-
-        if (results.length) {
-          const value = results[0].rawValue;
-
-          stopScanner();
-          handleScannedCode(value, target);
-          return;
-        }
-
-      } catch (error) {
-        console.warn("Barcode scan error:", error);
-      }
-
-      if (state.scannerActive) {
-        requestAnimationFrame(scanFrame);
-      }
-    }
-
-    scanFrame();
-
-  } catch (error) {
-    stopScanner();
-    showToast("Camera permission or scanner error: " + error.message);
-  }
-}
-
-function stopScanner() {
-  state.scannerActive = false;
-
-  if (state.scannerStream) {
-    state.scannerStream.getTracks().forEach(track => track.stop());
-    state.scannerStream = null;
-  }
-
-  const video = $("scannerVideo");
-
-  if (video) {
-    video.pause();
-    video.srcObject = null;
-    video.style.display = "none";
-  }
-
-  if ($("startScanner")) $("startScanner").hidden = false;
-  if ($("stopScanner")) $("stopScanner").hidden = true;
-}
-
-function handleScannedCode(value, target) {
-  const item = findItem(value);
-
-  if (!item) {
-    showToast("Scanned code does not match any Item Code.");
-    return;
-  }
-
-  if (target === "issue") {
-    $("issueItemSearch").value = item.ItemCode;
-    updateOverrideVisibility();
-  }
-
-  if (target === "inward") {
-    $("inwardItem").value = item.ItemCode;
-  }
-
-  showToast("Material found: " + item.ItemName);
-}
 
 /* =========================================================
    ADMIN SETTINGS
    ========================================================= */
 
 function renderSettings() {
-  if (state.role !== "ADMIN") {
+  if (!isAdmin()) {
     $("pageContent").innerHTML =
       '<div class="empty-state">Admin access required.</div>';
     return;
   }
 
   $("pageContent").innerHTML = `
+
     <div class="panel">
+
       <h2>Change Login Password</h2>
 
       <form id="passwordForm">
+
         <div class="form-grid">
+
           <div class="form-field">
             <label>Current Password</label>
             <input type="password" id="oldPassword" required>
@@ -1702,77 +2061,131 @@ function renderSettings() {
 
           <div class="form-field">
             <label>New Password</label>
-            <input type="password" id="newPassword"
-              minlength="10" required>
+            <input
+              type="password"
+              id="newPassword"
+              minlength="10"
+              required
+            >
           </div>
+
         </div>
 
-        <button class="action-button">Change Password</button>
+        <button class="action-button">
+          Change Password
+        </button>
+
       </form>
+
     </div>
 
+
     <div class="panel">
+
       <h2>Change Override Password</h2>
 
       <form id="overrideForm">
+
         <div class="form-grid">
+
           <div class="form-field">
             <label>Current Override Password</label>
-            <input type="password" id="oldOverridePassword" required>
+            <input
+              type="password"
+              id="oldOverridePassword"
+              required
+            >
           </div>
 
           <div class="form-field">
             <label>New Override Password</label>
-            <input type="password" id="newOverridePassword"
-              minlength="10" required>
+            <input
+              type="password"
+              id="newOverridePassword"
+              minlength="10"
+              required
+            >
           </div>
+
         </div>
 
-        <button class="action-button">Change Override Password</button>
+        <button class="action-button">
+          Change Override Password
+        </button>
+
       </form>
+
     </div>
 
+
     <div class="panel">
+
       <h2>Create User</h2>
 
       <form id="userForm">
+
         <div class="form-grid">
+
           <div class="form-field">
             <label>Username</label>
             <input id="newUsername" required>
           </div>
 
           <div class="form-field">
-            <label>Password (minimum 10 characters)</label>
-            <input type="password" id="newUserPassword"
-              minlength="10" required>
+            <label>Password</label>
+            <input
+              type="password"
+              id="newUserPassword"
+              minlength="10"
+              required
+            >
           </div>
 
           <div class="form-field">
             <label>Role</label>
+
             <select id="newUserRole">
               <option value="USER">User</option>
               <option value="ADMIN">Admin</option>
             </select>
           </div>
+
         </div>
 
-        <button class="action-button">Create User</button>
+        <button class="action-button">
+          Create User
+        </button>
+
       </form>
+
     </div>
 
+
     <div class="panel">
+
       <h2>Database Backup</h2>
+
       <p>Create a copy of the Google Spreadsheet in Google Drive.</p>
-      <button id="backupButton" class="action-button">
+
+      <button
+        id="backupButton"
+        class="action-button"
+        type="button"
+      >
         Create Backup Now
       </button>
+
     </div>
 
+
     <div class="panel">
+
       <h2>Admin Correction</h2>
+
       <form id="correctionForm">
+
         <div class="form-grid">
+
           <div class="form-field">
             <label>Transaction ID</label>
             <input id="correctionTxn" required>
@@ -1787,20 +2200,33 @@ function renderSettings() {
             <label>Corrected Notes</label>
             <textarea id="correctionNotes"></textarea>
           </div>
+
         </div>
 
-        <button class="action-button">Save Notes Correction</button>
+        <button class="action-button">
+          Save Notes Correction
+        </button>
+
       </form>
+
     </div>
+
   `;
 
   $("passwordForm").addEventListener("submit", async event => {
     event.preventDefault();
 
+    const newPassword = $("newPassword").value;
+
+    if (newPassword.length < 10) {
+      showToast("New password minimum 10 characters ka hona chahiye.");
+      return;
+    }
+
     try {
       await api("changePassword", {
         oldPassword: $("oldPassword").value,
-        newPassword: $("newPassword").value
+        newPassword
       });
 
       showToast("Login password changed.");
@@ -1814,10 +2240,17 @@ function renderSettings() {
   $("overrideForm").addEventListener("submit", async event => {
     event.preventDefault();
 
+    const newPassword = $("newOverridePassword").value;
+
+    if (newPassword.length < 10) {
+      showToast("Override password minimum 10 characters ka hona chahiye.");
+      return;
+    }
+
     try {
       await api("changeOverridePassword", {
         oldPassword: $("oldOverridePassword").value,
-        newPassword: $("newOverridePassword").value
+        newPassword
       });
 
       showToast("Override password changed.");
@@ -1833,7 +2266,7 @@ function renderSettings() {
 
     try {
       await api("addUser", {
-        username: $("newUsername").value,
+        username: $("newUsername").value.trim(),
         password: $("newUserPassword").value,
         role: $("newUserRole").value
       });
@@ -1851,7 +2284,8 @@ function renderSettings() {
 
     try {
       const result = await api("createBackup");
-      showToast(result.message);
+
+      showToast(result.message || "Backup created.");
 
     } catch (error) {
       showToast(error.message);
@@ -1863,12 +2297,13 @@ function renderSettings() {
 
     try {
       const result = await api("adminCorrection", {
-        txnId: $("correctionTxn").value,
-        reason: $("correctionReason").value,
+        txnId: $("correctionTxn").value.trim(),
+        reason: $("correctionReason").value.trim(),
         notes: $("correctionNotes").value
       });
 
-      showToast(result.message);
+      showToast(result.message || "Correction saved.");
+
       $("correctionForm").reset();
 
     } catch (error) {
@@ -1877,71 +2312,160 @@ function renderSettings() {
   });
 }
 
+
 /* =========================================================
-   SEARCH HELPERS
+   QR / BARCODE SCANNER
    ========================================================= */
 
-function itemDatalist() {
-  return `
-    <datalist id="itemList">
-      ${state.items.map(i => `
-        <option value="${escapeAttribute(i.ItemName)}">
-          ${escapeHTML(i.ItemCode)}
-        </option>
-        <option value="${escapeAttribute(i.ItemCode)}">
-          ${escapeHTML(i.ItemName)}
-        </option>
-      `).join("")}
-    </datalist>
+async function startScanner(targetId) {
+  const target = $(targetId);
+
+  if (!target) return;
+
+  if (!("BarcodeDetector" in window)) {
+    showToast(
+      "Is browser mein Barcode Scanner supported nahi hai. Item Code manually enter karein."
+    );
+    return;
+  }
+
+  const detector = new BarcodeDetector({
+    formats: [
+      "qr_code",
+      "code_128",
+      "code_39",
+      "ean_13",
+      "ean_8",
+      "upc_a",
+      "upc_e"
+    ]
+  });
+
+  const scannerBox = $("issueScanner");
+
+  if (!scannerBox) return;
+
+  scannerBox.hidden = false;
+
+  scannerBox.innerHTML = `
+    <div class="panel">
+
+      <h3>Scan QR / Barcode</h3>
+
+      <video
+        id="scannerVideo"
+        autoplay
+        muted
+        playsinline
+        style="width:100%;max-width:450px"
+      ></video>
+
+      <p id="scannerStatus">Camera starting...</p>
+
+      <button
+        type="button"
+        class="secondary-button"
+        id="stopScanner"
+      >
+        Stop Scanner
+      </button>
+
+    </div>
   `;
+
+  $("stopScanner").addEventListener("click", stopScanner);
+
+  try {
+    state.scannerStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" }
+      },
+      audio: false
+    });
+
+    const video = $("scannerVideo");
+
+    video.srcObject = state.scannerStream;
+
+    await video.play();
+
+    state.scanner = {
+      detector,
+      video,
+      target
+    };
+
+    scanFrame();
+
+  } catch (error) {
+    stopScanner();
+
+    showToast(
+      "Camera permission nahi mili. Browser settings check karein."
+    );
+  }
 }
 
-function peopleDatalist() {
-  return `
-    <datalist id="peopleList">
-      ${state.people.map(p => `
-        <option value="${escapeAttribute(p.PersonName)}">
-          ${escapeHTML(p.EmployeeCode)}
-        </option>
-        <option value="${escapeAttribute(p.EmployeeCode)}">
-          ${escapeHTML(p.PersonName)}
-        </option>
-      `).join("")}
-    </datalist>
-  `;
+async function scanFrame() {
+  if (!state.scanner) return;
+
+  try {
+    const results = await state.scanner.detector.detect(
+      state.scanner.video
+    );
+
+    if (results.length) {
+      const code = String(results[0].rawValue || "").trim();
+
+      const item = state.items.find(i =>
+        String(i.ItemCode).toLowerCase() === code.toLowerCase()
+      );
+
+      if (item) {
+        state.scanner.target.value = item.ItemCode;
+
+        showToast("Material scanned: " + item.ItemName);
+
+        stopScanner();
+        updateOverrideVisibility();
+
+        return;
+      }
+
+      $("scannerStatus").textContent =
+        "Scanned code material list mein nahi mila.";
+    }
+
+  } catch (error) {
+    console.warn("Scanner error:", error);
+  }
+
+  if (state.scanner) {
+    requestAnimationFrame(scanFrame);
+  }
 }
 
-function findPerson(value) {
-  const q = String(value || "").trim().toLowerCase();
+function stopScanner() {
+  if (state.scannerStream) {
+    state.scannerStream.getTracks().forEach(track => {
+      track.stop();
+    });
+  }
 
-  return state.people.find(p =>
-    String(p.PersonName).toLowerCase() === q ||
-    String(p.EmployeeCode).toLowerCase() === q ||
-    String(p.PersonID).toLowerCase() === q
-  );
+  state.scannerStream = null;
+  state.scanner = null;
+
+  const scannerBox = $("issueScanner");
+
+  if (scannerBox) {
+    scannerBox.hidden = true;
+    scannerBox.innerHTML = "";
+  }
 }
 
-function findItem(value) {
-  const q = String(value || "").trim().toLowerCase();
-
-  return state.items.find(i =>
-    String(i.ItemName).toLowerCase() === q ||
-    String(i.ItemCode).toLowerCase() === q
-  );
-}
-
-function employeeItemOutstanding(employeeCode, itemCode) {
-  return state.transactions
-    .filter(t =>
-      t.Type === "ISSUE" &&
-      String(t.EmployeeCode) === String(employeeCode) &&
-      String(t.ItemCode) === String(itemCode)
-    )
-    .reduce((sum, t) => sum + getOutstanding(t.TxnID), 0);
-}
 
 /* =========================================================
-   UI HELPERS
+   COMMON HELPERS
    ========================================================= */
 
 function statCard(label, value) {
@@ -1953,43 +2477,136 @@ function statCard(label, value) {
   `;
 }
 
+function itemOptions() {
+  return `
+    <option value="">Select material</option>
+
+    ${state.items.map(item => `
+      <option value="${escapeAttribute(item.ItemCode)}">
+        ${escapeHTML(item.ItemName)}
+        (${escapeHTML(item.ItemCode)})
+        — Available: ${number(item.AvailableStock)}
+      </option>
+    `).join("")}
+  `;
+}
+
+function peopleDatalist() {
+  return `
+    <datalist id="peopleList">
+
+      ${state.people.map(p => `
+        <option value="${escapeAttribute(p.PersonName)}">
+          ${escapeHTML(p.EmployeeCode)}
+        </option>
+
+        <option value="${escapeAttribute(p.EmployeeCode)}">
+          ${escapeHTML(p.PersonName)}
+        </option>
+      `).join("")}
+
+    </datalist>
+  `;
+}
+
+function employeeItemOutstanding(person, itemCode) {
+  if (!person) return 0;
+
+  return state.transactions
+    .filter(t => {
+      const samePerson =
+        person.PersonID &&
+        t.PersonID &&
+        String(t.PersonID) === String(person.PersonID);
+
+      const fallbackPerson =
+        !t.PersonID &&
+        String(t.EmployeeCode) === String(person.EmployeeCode);
+
+      return (
+        t.Type === "ISSUE" &&
+        (samePerson || fallbackPerson) &&
+        String(t.ItemCode) === String(itemCode)
+      );
+    })
+    .reduce(
+      (sum, t) => sum + getOutstanding(t.TxnID),
+      0
+    );
+}
+
 function table(headers, rows) {
-  if (!rows || !rows.length) {
+  if (!rows.length) {
     return '<div class="empty-state">No records found.</div>';
   }
 
   return `
     <div class="table-wrap">
+
       <table>
+
         <thead>
           <tr>
-            ${headers.map(h => `<th>${escapeHTML(h)}</th>`).join("")}
+            ${headers.map(h =>
+              `<th>${escapeHTML(h)}</th>`
+            ).join("")}
           </tr>
         </thead>
 
         <tbody>
+
           ${rows.map(row => `
             <tr>
               ${row.map(cell => `
-                <td>${cell == null ? "" : cell}</td>
+                <td>${safeCell(cell)}</td>
               `).join("")}
             </tr>
           `).join("")}
+
         </tbody>
+
       </table>
+
     </div>
   `;
 }
 
+function safeCell(value) {
+  if (value == null) return "";
+
+  const text = String(value);
+
+  if (text.startsWith("<span class=")) {
+    return text;
+  }
+
+  if (
+    text.startsWith("<button") ||
+    text.startsWith("<select")
+  ) {
+    return text;
+  }
+
+  return escapeHTML(text);
+}
+
 function number(value) {
-  return Number(value || 0).toLocaleString("en-IN", {
+  const n = Number(value || 0);
+
+  if (!Number.isFinite(n)) return "0";
+
+  return n.toLocaleString("en-IN", {
     maximumFractionDigits: 3
   });
 }
 
 function formatDate(value) {
+  if (!value) return "-";
+
   const d = new Date(value);
+
   if (isNaN(d.getTime())) return "-";
+
   return d.toLocaleString("en-IN");
 }
 
@@ -2008,16 +2625,22 @@ function escapeAttribute(value) {
 
 function showToast(message) {
   const toast = $("toast");
-  if (!toast) {
-    alert(message);
-    return;
-  }
 
-  toast.textContent = message;
+  if (!toast) return;
+
+  toast.textContent = String(message || "");
+
   toast.classList.add("show");
 
-  setTimeout(() => toast.classList.remove("show"), 3500);
+  if (state.toastTimer) {
+    clearTimeout(state.toastTimer);
+  }
+
+  state.toastTimer = setTimeout(() => {
+    toast.classList.remove("show");
+  }, 3500);
 }
+
 
 /* =========================================================
    CSV EXPORT
@@ -2030,48 +2653,97 @@ function downloadCSV(rows) {
   }
 
   const headers = [
-    "TxnID", "Timestamp", "Type", "ItemCode", "ItemName",
-    "Quantity", "EmployeeCode", "PersonName", "Department",
-    "Reference", "Notes", "EnteredBy", "ReturnCondition"
+    "TxnID",
+    "Timestamp",
+    "Type",
+    "ItemCode",
+    "ItemName",
+    "Quantity",
+    "EmployeeCode",
+    "PersonName",
+    "Department",
+    "Reference",
+    "Notes",
+    "EnteredBy",
+    "ReturnCategory"
   ];
 
+  function csvValue(value) {
+    let text = String(value == null ? "" : value);
+
+    // Prevent CSV formula injection.
+    if (/^[\s]*[=+\-@]/.test(text)) {
+      text = "'" + text;
+    }
+
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+
   const csv = [
-    headers.join(","),
+    headers.map(csvValue).join(","),
+
     ...rows.map(row =>
-      headers.map(key => {
-        const value = String(row[key] == null ? "" : row[key]);
-        return '"' + value.replace(/"/g, '""') + '"';
-      }).join(",")
+      headers.map(key =>
+        csvValue(row[key])
+      ).join(",")
     )
+
   ].join("\r\n");
 
-  const blob = new Blob(["\uFEFF" + csv], {
-    type: "text/csv;charset=utf-8;"
-  });
+  const blob = new Blob(
+    ["\uFEFF" + csv],
+    { type: "text/csv;charset=utf-8;" }
+  );
 
   const url = URL.createObjectURL(blob);
+
   const link = document.createElement("a");
 
   link.href = url;
   link.download = "Material_Report.csv";
-  link.click();
 
-  URL.revokeObjectURL(url);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+
 /* =========================================================
-   PWA INSTALL
+   PWA SERVICE WORKER
    ========================================================= */
+
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+
+  try {
+    await navigator.serviceWorker.register("./service-worker.js");
+    console.log("Service Worker registered.");
+
+  } catch (error) {
+    console.warn("Service Worker registration failed:", error);
+  }
+}
 
 async function installApp() {
   if (!state.deferredInstall) {
-    showToast("Install option is not available in this browser.");
+    showToast(
+      "Install option abhi available nahi hai. Browser menu se Install App try karein."
+    );
     return;
   }
 
-  state.deferredInstall.prompt();
-  await state.deferredInstall.userChoice;
+  try {
+    await state.deferredInstall.prompt();
 
-  state.deferredInstall = null;
-  $("installButton").hidden = true;
+    await state.deferredInstall.userChoice;
+
+  } catch (error) {
+    console.warn("Install prompt:", error);
+
+  } finally {
+    state.deferredInstall = null;
+    $("installButton").hidden = true;
+  }
 }
