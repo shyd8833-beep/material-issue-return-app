@@ -1334,3 +1334,23 @@ tbody tr:last-child td {
     transform: translateX(0);
   }
 }
+
+
+/* Search input paired with native dropdowns */
+.dropdown-search {
+  display: block;
+  width: 100%;
+  min-height: 38px;
+  margin: 0 0 7px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  box-sizing: border-box;
+}
+.dropdown-search:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
