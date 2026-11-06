@@ -369,6 +369,8 @@ function setMobileSidebar(open) {
 
   sidebar.classList.toggle("open", Boolean(open));
   backdrop.classList.toggle("show", Boolean(open));
+  backdrop.setAttribute("aria-hidden", String(!open));
+  document.body.classList.toggle("mobile-menu-open", Boolean(open));
   button.setAttribute("aria-expanded", String(Boolean(open)));
   button.setAttribute(
     "aria-label",
