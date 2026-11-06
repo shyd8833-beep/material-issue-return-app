@@ -79,6 +79,22 @@ function init() {
     });
   });
 
+  const mobileMenuButton = $("mobileMenuButton");
+  const sidebarBackdrop = $("sidebarBackdrop");
+
+  if (mobileMenuButton && sidebarBackdrop) {
+    mobileMenuButton.addEventListener("click", () => {
+      setMobileSidebar(!$("sidebar").classList.contains("open"));
+    });
+    sidebarBackdrop.addEventListener("click", () => setMobileSidebar(false));
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape") setMobileSidebar(false);
+    });
+    window.addEventListener("resize", () => {
+      if (window.innerWidth > 768) setMobileSidebar(false);
+    });
+  }
+
   window.addEventListener("beforeinstallprompt", event => {
     event.preventDefault();
     state.deferredInstall = event;
@@ -345,6 +361,23 @@ async function refreshData() {
    NAVIGATION
    ========================================================= */
 
+function setMobileSidebar(open) {
+  const sidebar = $("sidebar");
+  const backdrop = $("sidebarBackdrop");
+  const button = $("mobileMenuButton");
+  if (!sidebar || !backdrop || !button) return;
+
+  sidebar.classList.toggle("open", Boolean(open));
+  backdrop.classList.toggle("show", Boolean(open));
+  backdrop.setAttribute("aria-hidden", String(!open));
+  document.body.classList.toggle("mobile-menu-open", Boolean(open));
+  button.setAttribute("aria-expanded", String(Boolean(open)));
+  button.setAttribute(
+    "aria-label",
+    open ? "Close navigation menu" : "Open navigation menu"
+  );
+}
+
 async function navigate(page) {
   if (!PAGE_INFO[page]) return;
 
@@ -359,6 +392,7 @@ async function navigate(page) {
   stopScanner();
 
   state.page = page;
+  setMobileSidebar(false);
 
   document.querySelectorAll(".nav-button").forEach(button => {
     button.classList.toggle(
@@ -2762,8 +2796,8 @@ function table(headers, rows) {
 
           ${rows.map(row => `
             <tr>
-              ${row.map(cell => `
-                <td>${safeCell(cell)}</td>
+              ${row.map((cell, index) => `
+                <td data-label="${escapeAttribute(headers[index] || "")}">${safeCell(cell)}</td>
               `).join("")}
             </tr>
           `).join("")}
