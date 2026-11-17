@@ -317,6 +317,7 @@ async function openApplication() {
   applyRolePermissions();
 
   try {
+    await refreshData();
     await navigate("dashboard");
 
   } catch (error) {
