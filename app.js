@@ -20,7 +20,9 @@ const state = {
   deferredInstall: null,
   scanner: null,
   scannerStream: null,
-  toastTimer: null
+  toastTimer: null,
+  dataDirty: true,
+  dataLoadedAt: 0
 };
 
 const $ = id => document.getElementById(id);
@@ -184,6 +186,14 @@ async function api(action, data = {}) {
     );
   }
 
+  const writeActions = [
+    "issue", "inward", "return", "classifyReturn",
+    "transferReusable", "saveItem", "savePerson",
+    "changePassword", "changeOverridePassword",
+    "addUser", "adminCorrection"
+  ];
+  if (writeActions.includes(action)) state.dataDirty = true;
+
   return result;
 }
 
@@ -307,7 +317,6 @@ async function openApplication() {
   applyRolePermissions();
 
   try {
-    await refreshData();
     await navigate("dashboard");
 
   } catch (error) {
@@ -354,6 +363,8 @@ async function refreshData() {
     : [];
 
   state.dashboard = dashboard;
+  state.dataDirty = false;
+  state.dataLoadedAt = Date.now();
 }
 
 
@@ -409,7 +420,12 @@ async function navigate(page) {
     '<div class="loading-panel">Loading...</div>';
 
   try {
-    await refreshData();
+    const dataIsStale =
+      state.dataDirty ||
+      !state.dataLoadedAt ||
+      Date.now() - state.dataLoadedAt > 30000;
+
+    if (dataIsStale) await refreshData();
 
     const renderers = {
       dashboard: renderDashboard,
@@ -2062,148 +2078,276 @@ function parseHindiNumber(text) {
   return 0;
 }
 
+function speakVoice(message) {
+  const text = String(message || "").trim();
+  if (!text || !("speechSynthesis" in window)) return;
+
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "hi-IN";
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  } catch (error) {
+    console.warn("Voice response unavailable:", error);
+  }
+}
+
+function showVoiceMessage(message) {
+  $("voiceResult").textContent = message;
+  speakVoice(message);
+}
+
+function voiceIsToday(value) {
+  const date = new Date(value);
+  const now = new Date();
+  return !isNaN(date.getTime()) &&
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+}
+
 function parseVoice() {
   const text = $("voiceText").value.trim();
 
   if (!text) {
-    showToast("पहले अपना आदेश बोलें या लिखें।");
+    showVoiceMessage("पहले अपना सवाल या आदेश बोलें।");
     return;
   }
 
   const normalized = text.toLowerCase();
-
-  const quantity = parseHindiNumber(normalized);
-
-  if (!(quantity > 0)) {
-    showToast("Quantity samajh nahi aayi. Number dobara boliye.");
-    return;
-  }
-
   const personMatches = state.people.filter(p => {
     const name = String(p.PersonName || "").toLowerCase();
     const code = String(p.EmployeeCode || "").toLowerCase();
-
-    return (
-      (name.length > 1 && normalized.includes(name)) ||
-      (code.length > 1 && normalized.includes(code))
-    );
+    return (name.length > 1 && normalized.includes(name)) ||
+      (code.length > 1 && normalized.includes(code));
   });
-
   const itemMatches = state.items.filter(item => {
     const name = String(item.ItemName || "").toLowerCase();
     const code = String(item.ItemCode || "").toLowerCase();
-
-    return (
-      (name.length > 1 && normalized.includes(name)) ||
-      (code.length > 1 && normalized.includes(code))
-    );
+    return (name.length > 1 && normalized.includes(name)) ||
+      (code.length > 1 && normalized.includes(code));
   });
 
-  if (personMatches.length !== 1) {
-    $("voiceResult").textContent =
-      personMatches.length > 1
-        ? "एक से ज्यादा Employee मिले। कृपया Employee Code बोलें।"
-        : "Employee नहीं मिला। सही नाम या Employee Code बोलें।";
-
+  const wantsTodayCount =
+    /(आज|aaj|today)/.test(normalized) &&
+    /(issue|इश्यू|जारी|निकाल)/.test(normalized);
+  if (wantsTodayCount) {
+    const todayIssues = state.transactions.filter(t =>
+      t.Type === "ISSUE" && voiceIsToday(t.Timestamp)
+    );
+    const totalQuantity = todayIssues.reduce(
+      (sum, t) => sum + Number(t.Quantity || 0), 0
+    );
+    const answer = "आज " + todayIssues.length +
+      " Issue transactions हुए हैं। कुल " + number(totalQuantity) +
+      " quantity जारी हुई है।";
+    showVoiceMessage(answer);
     return;
   }
 
+  const isReturn =
+    /return|वापस|लौटा|जमा करो|जमा कर|वापिस/.test(normalized);
+  const isIssue =
+    /issue|दे दो|जारी|निकाल|भेज|इश्यू|देदो/.test(normalized);
+  const asksPending =
+    /pending|बाकी|लंबित|के पास|पास है|outstanding/.test(normalized);
+  const asksStock =
+    /stock|स्टॉक|उपलब्ध|available|बचे|कितने|कितना/.test(normalized);
+
+  if (!isIssue && !isReturn && asksPending) {
+    if (personMatches.length !== 1) {
+      showVoiceMessage(
+        personMatches.length > 1
+          ? "एक से ज्यादा कर्मचारी मिले। कृपया Employee Code बोलें।"
+          : "कर्मचारी नहीं मिला। सही नाम या Employee Code बोलें।"
+      );
+      return;
+    }
+
+    const person = personMatches[0];
+    if (itemMatches.length > 1) {
+      showVoiceMessage("एक से ज्यादा Material मिले। कृपया Item Code बोलें।");
+      return;
+    }
+    let pending = 0;
+    if (itemMatches.length === 1) {
+      pending = employeeItemOutstanding(person, itemMatches[0].ItemCode);
+      showVoiceMessage(
+        person.PersonName + " के पास " + itemMatches[0].ItemName +
+        " की " + number(pending) + " quantity pending है।"
+      );
+    } else {
+      pending = state.transactions
+        .filter(t => t.Type === "ISSUE" &&
+          ((person.PersonID && String(t.PersonID) === String(person.PersonID)) ||
+           (!t.PersonID && String(t.EmployeeCode) === String(person.EmployeeCode))))
+        .reduce((sum, t) => sum + getOutstanding(t.TxnID), 0);
+      showVoiceMessage(
+        person.PersonName + " के पास कुल " + number(pending) +
+        " quantity pending है।"
+      );
+    }
+    return;
+  }
+
+  if (!isIssue && !isReturn && asksStock) {
+    if (itemMatches.length > 1) {
+      showVoiceMessage("एक से ज्यादा Material मिले। कृपया Item Code बोलें।");
+      return;
+    }
+    if (itemMatches.length === 1) {
+      const item = itemMatches[0];
+      showVoiceMessage(
+        item.ItemName + " का उपलब्ध Fresh Stock " +
+        number(item.AvailableStock) + " " + (item.Unit || "") + " है।"
+      );
+    } else {
+      const total = state.items.reduce(
+        (sum, item) => sum + Number(item.AvailableStock || 0), 0
+      );
+      showVoiceMessage(
+        "सभी Materials का कुल उपलब्ध Fresh Stock " +
+        number(total) + " है। किसी एक Material का नाम बोलें तो उसका Stock बता सकता हूँ।"
+      );
+    }
+    return;
+  }
+
+  if (!isIssue && !isReturn) {
+    showVoiceMessage(
+      "मैं Stock, कर्मचारी का Pending Material और आज के Issue बता सकता हूँ। Issue या Return का आदेश भी समझ सकता हूँ।"
+    );
+    return;
+  }
+
+  const quantity = parseHindiNumber(normalized);
+  if (!(quantity > 0)) {
+    showVoiceMessage("Quantity समझ नहीं आई। कृपया संख्या दोबारा बोलें।");
+    return;
+  }
+  if (personMatches.length !== 1) {
+    showVoiceMessage(
+      personMatches.length > 1
+        ? "एक से ज्यादा कर्मचारी मिले। कृपया Employee Code बोलें।"
+        : "कर्मचारी नहीं मिला। सही नाम या Employee Code बोलें।"
+    );
+    return;
+  }
   if (itemMatches.length !== 1) {
-    $("voiceResult").textContent =
+    showVoiceMessage(
       itemMatches.length > 1
         ? "एक से ज्यादा Material मिले। कृपया Item Code बोलें।"
-        : "Material नहीं मिला। सही Material Name या Code बोलें।";
-
+        : "Material नहीं मिला। सही Material Name या Code बोलें।"
+    );
     return;
   }
 
   const person = personMatches[0];
   const item = itemMatches[0];
-
-  const isReturn =
-    /return|वापस|लौटा|जमा करो|जमा कर/.test(normalized);
-
-  const isIssue =
-    /issue|दे दो|जारी|निकाल|भेज|इश्यू/.test(normalized);
+  const outstanding = employeeItemOutstanding(person, item.ItemCode);
 
   if (isReturn) {
-    $("voiceResult").textContent =
-      "Return command पहचाना गया। Material Return पेज पर जाकर Original Issue चुनें।";
+    const matchingIssues = state.transactions.filter(t => {
+      const samePerson =
+        (person.PersonID && t.PersonID &&
+          String(person.PersonID) === String(t.PersonID)) ||
+        (!t.PersonID && String(t.EmployeeCode) === String(person.EmployeeCode));
+      return t.Type === "ISSUE" && samePerson &&
+        String(t.ItemCode) === String(item.ItemCode) &&
+        getOutstanding(t.TxnID) > 0;
+    });
+
+    if (matchingIssues.length !== 1) {
+      showVoiceMessage(
+        matchingIssues.length > 1
+          ? "इस कर्मचारी के इस Material के कई Original Issues Pending हैं। सही Original Issue चुनने के लिए Material Return पेज खोलें।"
+          : "इस कर्मचारी के पास इस Material का कोई Pending Issue नहीं मिला।"
+      );
+      return;
+    }
+    const issueTxn = matchingIssues[0];
+    const issuePending = getOutstanding(issueTxn.TxnID);
+    if (quantity > issuePending) {
+      showVoiceMessage(
+        "इतनी quantity वापस नहीं हो सकती। इस Original Issue में " +
+        number(issuePending) + " pending है।"
+      );
+      return;
+    }
+
+    $("voiceResult").innerHTML = `
+      <div class="panel">
+        <h2>Return की पुष्टि करें</h2>
+        <p>कर्मचारी: <strong>${escapeHTML(person.PersonName)}</strong></p>
+        <p>Material: <strong>${escapeHTML(item.ItemName)}</strong></p>
+        <p>वापस मात्रा: <strong>${number(quantity)}</strong></p>
+        <p>Original Issue: <strong>${escapeHTML(issueTxn.TxnID)}</strong></p>
+        <p>ध्यान दें: Return सेव होने से Fresh Stock अपने-आप नहीं बढ़ेगा।</p>
+        <button type="button" class="action-button" id="confirmVoiceReturn">
+          Confirm and Return
+        </button>
+      </div>
+    `;
+    speakVoice(
+      person.PersonName + " से " + item.ItemName + " की " +
+      quantity + " quantity वापस लेने का आदेश है। पुष्टि के बाद Return दर्ज होगा।"
+    );
+    $("confirmVoiceReturn").addEventListener("click", async () => {
+      if (!confirm("क्या आप यह Return सेव करना चाहते हैं?")) return;
+      try {
+        await api("return", {
+          issueTxnId: issueTxn.TxnID,
+          quantity,
+          notes: "Voice Agent return entry"
+        });
+        showToast("Voice return saved. Classification pending.");
+        await refreshData();
+        $("voiceResult").textContent = "Return दर्ज हो गया। Fresh Stock में अपने-आप नहीं जोड़ा गया है।";
+        speakVoice("Return दर्ज हो गया है। Classification अभी बाकी है।");
+      } catch (error) {
+        showVoiceMessage(error.message);
+      }
+    });
     return;
   }
-
-  if (!isIssue) {
-    showToast("Issue command स्पष्ट नहीं है।");
-    return;
-  }
-
-  const outstanding = employeeItemOutstanding(
-    person,
-    item.ItemCode
-  );
 
   if (outstanding > 0 && !isAdmin()) {
-    $("voiceResult").textContent =
-      "इस Employee के पास यह Material पहले से Pending है।";
+    showVoiceMessage("इस कर्मचारी के पास यह Material पहले से Pending है।");
     return;
   }
-
   if (quantity > Number(item.AvailableStock || 0)) {
-    showToast("पर्याप्त Stock उपलब्ध नहीं है।");
+    showVoiceMessage("पर्याप्त Fresh Stock उपलब्ध नहीं है। उपलब्ध मात्रा " +
+      number(item.AvailableStock) + " है।");
     return;
   }
 
   $("voiceResult").innerHTML = `
     <div class="panel">
-
-      <h2>आदेश की पुष्टि करें</h2>
-
-      <p>
-        कर्मचारी:
-        <strong>${escapeHTML(person.PersonName)}</strong>
-      </p>
-
-      <p>
-        Employee Code:
-        <strong>${escapeHTML(person.EmployeeCode)}</strong>
-      </p>
-
-      <p>
-        Material:
-        <strong>${escapeHTML(item.ItemName)}</strong>
-      </p>
-
-      <p>
-        Quantity:
-        <strong>${number(quantity)}</strong>
-      </p>
-
-      ${
-        outstanding > 0 && isAdmin()
-          ? `
-            <p>Admin Override Password</p>
-            <input type="password" id="voiceOverridePassword">
-
-            <p>Override Reason</p>
-            <textarea id="voiceOverrideReason"></textarea>
-          `
-          : ""
-      }
-
-      <button
-        type="button"
-        class="action-button"
-        id="confirmVoiceIssue"
-      >
+      <h2>Issue की पुष्टि करें</h2>
+      <p>कर्मचारी: <strong>${escapeHTML(person.PersonName)}</strong></p>
+      <p>Employee Code: <strong>${escapeHTML(person.EmployeeCode)}</strong></p>
+      <p>Material: <strong>${escapeHTML(item.ItemName)}</strong></p>
+      <p>Quantity: <strong>${number(quantity)}</strong></p>
+      ${outstanding > 0 && isAdmin() ? `
+        <p>Admin Override Password</p>
+        <input type="password" id="voiceOverridePassword" autocomplete="current-password">
+        <p>Override Reason</p>
+        <textarea id="voiceOverrideReason"></textarea>
+      ` : ""}
+      <button type="button" class="action-button" id="confirmVoiceIssue">
         Confirm and Issue
       </button>
-
     </div>
   `;
+  speakVoice(
+    person.PersonName + " को " + item.ItemName + " की " +
+    quantity + " quantity Issue करने का आदेश है। पुष्टि के बाद ही सेव होगा।"
+  );
 
   $("confirmVoiceIssue").addEventListener("click", async () => {
     if (!confirm("क्या आप यह Issue सेव करना चाहते हैं?")) return;
-
     try {
       await api("issue", {
         itemCode: item.ItemCode,
@@ -2211,21 +2355,16 @@ function parseVoice() {
         personId: person.PersonID,
         quantity,
         notes: "Voice Agent entry",
-        overridePassword:
-          $("voiceOverridePassword")?.value || "",
-        overrideReason:
-          $("voiceOverrideReason")?.value || ""
+        overridePassword: $("voiceOverridePassword")?.value || "",
+        overrideReason: $("voiceOverrideReason")?.value || ""
       });
-
       showToast("Voice order issued successfully.");
-
       $("voiceText").value = "";
-      $("voiceResult").textContent = "";
-
       await refreshData();
-
+      $("voiceResult").textContent = "Issue सफलतापूर्वक सेव हो गया।";
+      speakVoice("Issue सफलतापूर्वक सेव हो गया है।");
     } catch (error) {
-      showToast(error.message);
+      showVoiceMessage(error.message);
     }
   });
 }
