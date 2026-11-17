@@ -2152,9 +2152,9 @@ function parseVoice() {
   const isIssue =
     /issue|दे दो|जारी|निकाल|भेज|इश्यू|देदो/.test(normalized);
   const asksPending =
-    /pending|बाकी|लंबित|के पास|पास है|outstanding/.test(normalized);
+    /pending|बाकी|लंबित|के पास|पास है|ke paas|ke pass|outstanding/.test(normalized);
   const asksStock =
-    /stock|स्टॉक|उपलब्ध|available|बचे|कितने|कितना/.test(normalized);
+    /stock|स्टॉक|उपलब्ध|available|बचे|बचा|बची|kitna|kitana|kitni|kitane|kitne|कितने|कितना/.test(normalized);
 
   if (!isIssue && !isReturn && asksPending) {
     if (personMatches.length !== 1) {
